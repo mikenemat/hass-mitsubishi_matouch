@@ -7,7 +7,7 @@ from construct_typed import EnumBase, FlagsEnumBase
 __all__ = [
     "MA_MIN_TEMP",
     "MA_MAX_TEMP",
-    "DEFAULT_CONNECTION_TIMEOUT",
+    "DEFAULT_MAX_CONNECT_RETRIES",
     "DEFAULT_COMMAND_TIMEOUT",
     "MAOperationMode",
     "MAFanMode",
@@ -21,8 +21,8 @@ MA_MIN_TEMP = 16.0
 """The maximum temperature that can be set in degrees Celsius."""
 MA_MAX_TEMP = 31.0
 
-"""The default connection timeout in seconds."""
-DEFAULT_CONNECTION_TIMEOUT = 20
+"""The default maximum connect retries."""
+DEFAULT_MAX_CONNECT_RETRIES = 3
 
 """The default command timeout in seconds."""
 DEFAULT_COMMAND_TIMEOUT = 5
