@@ -44,5 +44,10 @@ class MAInternalException(MAException):
 class MAResponseException(MAException):
     """Exception for response errors."""
 
+
+class MAControlRequestFailedException(MAException):
+    """Exception for control request failures."""
+
+
 class MAAuthException(MAException):
     """Exception for auth errors."""
