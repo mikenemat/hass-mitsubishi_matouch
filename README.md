@@ -1,3 +1,5 @@
+![GitHub Release](https://img.shields.io/github/v/release/cyaneous/hass-mitsubishi_matouch) ![GitHub Downloads (all assets, latest release)](https://img.shields.io/github/downloads/cyaneous/hass-mitsubishi_matouch/latest/total)  ![GitHub Downloads (all assets, all releases)](https://img.shields.io/github/downloads/cyaneous/hass-mitsubishi_matouch/total?label=Total%20Downloads&color=blue)
+
 # Mitsubishi MA Touch integration for Home Assistant
 
 This integration adds support for controlling Mitsubishi MA Touch BLE thermostats. 
