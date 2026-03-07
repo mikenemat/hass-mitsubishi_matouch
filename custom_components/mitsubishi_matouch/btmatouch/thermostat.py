@@ -11,6 +11,8 @@ from bleak.backends.characteristic import BleakGATTCharacteristic
 from bleak.backends.device import BLEDevice
 from bleak.exc import BleakError
 
+from bleak_retry_connector import establish_connection, BleakClientWithServiceCache
+
 from ._structures import (
     _MAMessageHeader,
     _MAMessageFooter,
@@ -23,7 +25,7 @@ from ._structures import (
     _MAControlResponse,
 )
 from .const import (
-    DEFAULT_CONNECTION_TIMEOUT,
+    DEFAULT_MAX_CONNECT_RETRIES,
     DEFAULT_COMMAND_TIMEOUT,
     DEFAULT_RESPONSE_TIMEOUT,
     MAOperationMode,
@@ -58,7 +60,7 @@ class Thermostat:
         self,
         pin: int,
         ble_device: BLEDevice,
-        connection_timeout: int = DEFAULT_CONNECTION_TIMEOUT,
+        max_connect_retries: int = DEFAULT_MAX_CONNECT_RETRIES,
         command_timeout: int = DEFAULT_COMMAND_TIMEOUT,
         response_timeout: int = DEFAULT_RESPONSE_TIMEOUT,
     ):
@@ -77,19 +79,14 @@ class Thermostat:
         self._mac_address = ble_device.address
         self._pin = pin
         self._ble_device = ble_device
-        self._connection_timeout = connection_timeout
+        self._max_connect_retries = max_connect_retries
         self._command_timeout = command_timeout
         self._response_timeout = response_timeout
 
         self._firmware_version: str | None = None
         self._software_version: str | None = None
 
-        # TODO: hass docs recommend not reusing BleakClient between connections to avoid connection instability?
-        self._conn = BleakClient(
-            self._ble_device,
-            disconnected_callback=self._on_disconnected,
-            timeout=DEFAULT_CONNECTION_TIMEOUT,
-        )
+        self._conn: BleakClient | None = None
         self._connection_lock = asyncio.Lock()
         self._gatt_lock = asyncio.Lock()
         self._response_future: asyncio.Future[bytes] | None = None
@@ -105,6 +102,9 @@ class Thermostat:
         Returns:
             bool: True if connected, False otherwise.
         """
+
+        if self._conn is None:
+            return False
 
         return self._conn.is_connected
 
@@ -140,7 +140,13 @@ class Thermostat:
         self._message_id = 0
 
         try:
-            await self._conn.connect()
+            self._conn = await establish_connection(
+                BleakClientWithServiceCache,
+                self._ble_device,
+                self._mac_address,
+                disconnected_callback=self._on_disconnected,
+                max_attempts=self._max_connect_retries
+            )
 
             _LOGGER.debug("[%s] Connected!", self._mac_address)
 
