@@ -11,7 +11,7 @@ from bleak.backends.characteristic import BleakGATTCharacteristic
 from bleak.backends.device import BLEDevice
 from bleak.exc import BleakError
 
-from bleak_retry_connector import establish_connection, BleakClientWithServiceCache
+from bleak_retry_connector import establish_connection
 
 from ._structures import (
     _MAMessageHeader,
@@ -142,7 +142,7 @@ class Thermostat:
 
         try:
             self._conn = await establish_connection(
-                BleakClientWithServiceCache,
+                BleakClient,
                 self._ble_device,
                 self._mac_address,
                 disconnected_callback=self._on_disconnected,
