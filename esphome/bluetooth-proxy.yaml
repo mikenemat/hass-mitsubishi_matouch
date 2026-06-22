@@ -1,0 +1,59 @@
+# ESPHome Bluetooth Proxy config for the Mitsubishi MA Touch integration.
+#
+# Flash ONE copy of this per ESP32 board. Size at roughly one proxy per 2-3
+# thermostats (each active proxy reliably holds ~3 concurrent connections, and the
+# integration holds one persistent connection per thermostat). Spread the boards so
+# every thermostat is in good range of at least one proxy; Home Assistant routes and
+# load-balances each device automatically.
+#
+# Easiest path (no toolchain): flash Espressif/ESPHome's ready-made firmware from a
+# Chrome/Edge browser at https://esphome.github.io/bluetooth-proxies/ and adopt it.
+# This file is the equivalent if you'd rather manage it in your ESPHome dashboard;
+# give each board a unique name (bt-proxy-1, bt-proxy-2, ...) and a secrets.yaml
+# with wifi_ssid, wifi_password, api_encryption_key, and ota_password.
+
+substitutions:
+  name: bt-proxy-1
+  friendly_name: BT Proxy 1
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf   # esp-idf is required for ACTIVE Bluetooth-proxy connections
+
+logger:
+
+# Native API connection to Home Assistant.
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  # Fallback hotspot for first-time provisioning.
+  ap:
+    ssid: "${friendly_name} Setup"
+
+captive_portal:
+
+# --- Bluetooth proxy ---
+# active: true lets Home Assistant make and HOLD connections through this proxy
+# (required for the integration's persistent-connection design). A passive-only
+# proxy just relays advertisements and could NOT control the thermostats.
+esp32_ble_tracker:
+  scan_parameters:
+    interval: 1100ms
+    window: 1100ms
+    active: true
+
+bluetooth_proxy:
+  active: true

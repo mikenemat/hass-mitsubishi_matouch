@@ -75,18 +75,96 @@ and a vendor account. This integration talks to each controller directly over BL
 advertise quietly and their control service is **GATT-only (not advertised)**, so
 they need a *connectable* Bluetooth path:
 
-- **Recommended — ESP32 Bluetooth proxies.** Flash one or more ESP32 boards with
-  ESPHome's [`bluetooth_proxy`](https://esphome.io/components/bluetooth_proxy.html)
-  in **active** mode and place them near your thermostats. Each proxy serves ~3
-  concurrent connections, so two proxies comfortably cover 4–5 units. The
-  integration discovers them through Home Assistant's Bluetooth stack and balances
-  connections across them automatically.
+- **Recommended — ESP32 Bluetooth proxies** (see [Bluetooth proxies](#bluetooth-proxies)
+  for sourcing, quantity, flashing, updates, and adding them to HA). They put a
+  radio near the controllers and let the integration load-balance and fail over
+  across them — this is the tested setup.
 - **Or a local adapter** — a built-in/USB Bluetooth adapter on the HA host works
   for one or two thermostats within radio range.
 
 **2. Find each controller's PIN.** It's the numeric password printed on (or
 supplied with) the controller — the same one the MELRemo app requires. You enter
 it per-thermostat when adding it.
+
+## Bluetooth proxies
+
+The integration holds **one persistent BLE connection per thermostat** and shares
+your Bluetooth proxies across all of them. For anything beyond a unit or two within
+radio range of the Home Assistant host, **ESP32 Bluetooth proxies are the
+recommended (and tested) transport** — they place a radio near the controllers and
+let the integration load-balance and fail over across them.
+
+> Bluetooth proxies are shared Home Assistant infrastructure, not part of this
+> integration. You set them up once in HA (below); this integration then discovers
+> and uses them automatically — there is nothing proxy-related to configure here.
+
+### How many you need
+
+Each ESPHome proxy in **active** mode reliably holds **~3 concurrent connections**,
+and the integration uses **one per thermostat**. Size it at roughly **one proxy per
+2–3 thermostats**, then add one extra for headroom and redundancy:
+
+| Thermostats | Proxies |
+|---|---|
+| 1–3 | 1 (2 for redundancy) |
+| 4–6 | 2 minimum, **3 recommended** |
+| 7–9 | 3 minimum, 4 recommended |
+
+The spare proxy means losing one doesn't take a thermostat offline — the
+integration rebalances onto the survivors and recovers on its own.
+
+### Sourcing the hardware
+
+Any Wi-Fi **ESP32** board works; the classic dual-core **ESP32-WROOM-32** DevKit
+(sold as “ESP32-WROOM-32” / “ESP32 DevKitC”) is the cheap, proven choice — roughly
+**$5–8 each**, commonly in 2- and 3-packs. You do **not** need an ESP32-S3/C3. Each
+board needs only **5V USB power** near the controllers and your **2.4 GHz Wi-Fi**.
+Pre-flashed commercial “Bluetooth Proxy” devices and PoE-powered ESP32 boards also
+work if you want a tidier permanent install.
+
+### Flashing the firmware
+
+**Easiest — official web installer (no toolchain):** open the
+[**ESPHome Bluetooth Proxy installer**](https://esphome.github.io/bluetooth-proxies/)
+in Chrome or Edge, plug the ESP32 in over USB, click **Connect → Install**, and
+enter your Wi-Fi. Repeat for each board. This flashes Espressif/ESPHome's ready-made
+**active** Bluetooth-proxy firmware.
+
+**Or manage it yourself:** a sample config is in
+[`esphome/bluetooth-proxy.yaml`](esphome/bluetooth-proxy.yaml) — adopt it into your
+ESPHome dashboard, set a unique `name`/`friendly_name` per board, and add a
+`secrets.yaml` (`wifi_ssid`, `wifi_password`, `api_encryption_key`, `ota_password`).
+It uses the **esp-idf** framework with `bluetooth_proxy: active: true` — *active* is
+required to **hold** connections; a passive proxy only relays advertisements and
+can't control the thermostats.
+
+### Updating firmware
+
+- **Web-installer boards:** re-run the web installer for the latest firmware, or
+  adopt the board into ESPHome so it gets OTA updates.
+- **ESPHome-managed boards:** update from the **ESPHome dashboard** (OTA, no USB).
+  Keep proxies current alongside the ESPHome add-on so the proxy protocol stays
+  compatible with your Home Assistant version.
+- Keep Home Assistant itself updated too — Bluetooth-proxy support lives in HA core.
+
+### Adding them to Home Assistant
+
+Once a proxy is flashed and on Wi-Fi, Home Assistant's **ESPHome integration
+auto-discovers it**: a *Discovered* ESPHome card appears under **Settings → Devices
+& Services** (or the web installer offers **Add to Home Assistant** at the end) —
+click **Configure** to adopt it. Each adopted proxy automatically becomes a
+Bluetooth **adapter/scanner** in HA. That's it: this integration sees the proxies
+through HA's Bluetooth stack and starts routing thermostats across them with no
+further configuration.
+
+### Placement
+
+Put each proxy within healthy RSSI of the thermostats it serves (2.4 GHz doesn't
+love walls and floors) and spread them so every thermostat hears at least one proxy
+well. The **Active proxy** and **Signal strength** diagnostic sensors show where
+each unit landed and how strong its link is. In the HA log, “out of connection
+slots” means add a proxy; frequent disconnects on one unit means move a proxy
+closer to it.
 
 ## Installation
 
