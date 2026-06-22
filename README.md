@@ -29,6 +29,14 @@ It focuses on doing a few things well:
 - 🇺🇸 **Correct Fahrenheit** — uses Mitsubishi's own °F lookup table so the Home
   Assistant card matches the physical controller exactly (no off-by-one).
 
+<p align="center">
+  <img src="images/thermostat-card.png" alt="Home Assistant thermostat card for a Casita Living Area MA Touch unit" width="350">
+  &nbsp;&nbsp;
+  <img src="images/diagnostics.png" alt="Per-thermostat diagnostic sensors: connection uptime, active proxy, signal strength, poll latency, reconnects, disconnects" width="368">
+</p>
+
+<p align="center"><sub>The Home Assistant thermostat card and per-device diagnostic telemetry for one unit.</sub></p>
+
 ## Why Bluetooth?
 
 MA Touch controllers are a **wired MA-bus** accessory; their only local, cloudless
@@ -37,7 +45,7 @@ alternative — Kumo Cloud — means an internet dependency, extra wiring/adapte
 and a vendor account. This integration talks to each controller directly over BLE:
 
 - **Local and private** — state and commands never leave your network.
-- **No app, no cloud account** — just the PIN printed on the controller.
+- **No app, no cloud account** — just the PIN from the thermostat's settings.
 - **Scales over your LAN** — because the BLE link is reached through **ESP32
   Bluetooth proxies**, the thermostats don't have to be near the Home Assistant
   host; the integration shares the proxy radios across all of them.
@@ -48,12 +56,11 @@ and a vendor account. This integration talks to each controller directly over BL
   (one parent entry, one removable “thermostat” subentry per device), which that
   release introduced. HACS enforces the minimum; developed/run on 2026.6.
 - **A Bluetooth transport that can reach your thermostats** — see
-  [Before you start](#before-you-start-bluetooth-reach--your-pin). One or more
-  **ESP32 Bluetooth proxies** (ESPHome `bluetooth_proxy`, *active* mode) is the
-  recommended setup for more than a unit or two; a local HA Bluetooth adapter
-  also works for nearby thermostats.
-- **The controller PIN** for each thermostat — the 4-digit password printed on
-  the controller (the same one MELRemo asks for).
+  [Before you start](#before-you-start). One or more **ESP32 Bluetooth proxies**
+  (ESPHome `bluetooth_proxy`, *active* mode) is the recommended setup for more than
+  a unit or two; a local HA Bluetooth adapter also works for nearby thermostats.
+- **Each thermostat's PIN** — revealed in the controller's **Settings → Bluetooth**
+  after you enable Bluetooth on it (see [Before you start](#before-you-start)).
 - The protocol library (`construct`, `construct-typing`) is pulled in
   automatically; nothing to install by hand.
 
@@ -69,11 +76,32 @@ and a vendor account. This integration talks to each controller directly over BL
 > an official Mitsubishi API. The wire protocol is **Celsius-native** in 0.5 °C
 > steps; everything else (including °F) is handled on the Home Assistant side.
 
-## Before you start: Bluetooth reach + your PIN
+## Before you start
 
-**1. Give Home Assistant Bluetooth reach to the thermostats.** MA Touch controllers
-advertise quietly and their control service is **GATT-only (not advertised)**, so
-they need a *connectable* Bluetooth path:
+You need two things: each thermostat's **Bluetooth enabled and its PIN noted**, and
+a **Bluetooth path** from Home Assistant to the thermostats.
+
+### 1. Enable Bluetooth on each thermostat and get its PIN
+
+Out of the box, MA Touch controllers don't expose Bluetooth — turn it on once per
+unit, which also reveals the PIN the integration needs:
+
+1. On the thermostat, open the **administrative / installer settings** (default
+   programming code **`0000`**) and **enable Bluetooth**.
+2. Back out to **Settings → Bluetooth**. The **PIN** is shown there, alongside the
+   controller's **Bluetooth MAC address** — note the MAC too; it makes labeling
+   which Home Assistant device is which much easier.
+3. Afterwards the PIN is also reachable from the **🔑 key icon** that appears on the
+   thermostat's home screen — but **Settings → Bluetooth** is preferred because it
+   lists the MAC right next to the PIN.
+
+You enter this PIN (and choose a name) per-thermostat when adding it in Home
+Assistant.
+
+### 2. Give Home Assistant Bluetooth reach to the thermostats
+
+MA Touch controllers advertise quietly and their control service is **GATT-only
+(not advertised)**, so they need a *connectable* Bluetooth path:
 
 - **Recommended — ESP32 Bluetooth proxies** (see [Bluetooth proxies](#bluetooth-proxies)
   for sourcing, quantity, flashing, updates, and adding them to HA). They put a
@@ -81,10 +109,6 @@ they need a *connectable* Bluetooth path:
   across them — this is the tested setup.
 - **Or a local adapter** — a built-in/USB Bluetooth adapter on the HA host works
   for one or two thermostats within radio range.
-
-**2. Find each controller's PIN.** It's the numeric password printed on (or
-supplied with) the controller — the same one the MELRemo app requires. You enter
-it per-thermostat when adding it.
 
 ## Bluetooth proxies
 
@@ -124,19 +148,18 @@ work if you want a tidier permanent install.
 
 ### Flashing the firmware
 
-**Easiest — official web installer (no toolchain):** open the
+**Just use the official web installer — no toolchain, no config.** Open the
 [**ESPHome Bluetooth Proxy installer**](https://esphome.github.io/bluetooth-proxies/)
 in Chrome or Edge, plug the ESP32 in over USB, click **Connect → Install**, and
-enter your Wi-Fi. Repeat for each board. This flashes Espressif/ESPHome's ready-made
-**active** Bluetooth-proxy firmware.
+enter your Wi-Fi. Repeat for each board. It flashes Espressif/ESPHome's ready-made
+**active** Bluetooth-proxy firmware that works as-is — there are **no scan intervals,
+windows, or other parameters to set**. Almost everyone should stop here.
 
-**Or manage it yourself:** a sample config is in
-[`esphome/bluetooth-proxy.yaml`](esphome/bluetooth-proxy.yaml) — adopt it into your
-ESPHome dashboard, set a unique `name`/`friendly_name` per board, and add a
-`secrets.yaml` (`wifi_ssid`, `wifi_password`, `api_encryption_key`, `ota_password`).
-It uses the **esp-idf** framework with `bluetooth_proxy: active: true` — *active* is
-required to **hold** connections; a passive proxy only relays advertisements and
-can't control the thermostats.
+<sub>*Advanced (optional):* if you'd rather manage the proxy from your own ESPHome
+dashboard, a minimal sample is in [`esphome/bluetooth-proxy.yaml`](esphome/bluetooth-proxy.yaml).
+The only setting that matters is `bluetooth_proxy: active: true` — an *active* proxy
+can hold connections; a passive one only relays advertisements and can't control the
+thermostats. Everything else is ESPHome defaults.</sub>
 
 ### Updating firmware
 
@@ -301,8 +324,8 @@ This integration is built to be left running 24/7 across flaky radios:
   and that the proxy is in **active** mode. The search auto-retries; you can also
   click **Search again**.
 - **Authentication fails / thermostat stays unavailable** → wrong PIN. Use the
-  thermostat's **Reconfigure** action to correct it (PIN = the password printed on
-  the controller, entered as 4 digits).
+  thermostat's **Reconfigure** action to correct it (the PIN is on the controller
+  under **Settings → Bluetooth** — see [Before you start](#before-you-start)).
 - **Card shows half-degrees or is 1 °F off** → you're on an older build; update to
   the current release, which presents native °F via Mitsubishi's table.
 - **An `E2` flashes on the controller** → that's a **controller-local** indicator

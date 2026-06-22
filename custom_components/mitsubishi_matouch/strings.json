@@ -18,7 +18,7 @@
       },
       "device": {
         "title": "Configure thermostat",
-        "description": "Set a name and the PIN (the password shown on the controller) for {device}.",
+        "description": "Set a name and the PIN for {device}. Find the PIN on the thermostat under Settings → Bluetooth (enable Bluetooth in the admin settings first; default code 0000).",
         "data": {
           "name": "Name",
           "pin": "PIN"
