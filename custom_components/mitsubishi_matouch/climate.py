@@ -10,19 +10,20 @@ from homeassistant.components.climate import (
     HVACAction,
     HVACMode,
 )
-from homeassistant.core import HomeAssistant, callback
-from homeassistant.const import ATTR_TEMPERATURE, PRECISION_HALVES, UnitOfTemperature
-from homeassistant.exceptions import ServiceValidationError
 from homeassistant.components.climate.const import SWING_ON, SWING_OFF
+from homeassistant.const import ATTR_TEMPERATURE, PRECISION_HALVES, PRECISION_WHOLE, UnitOfTemperature
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import ServiceValidationError
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.device_registry import CONNECTION_BLUETOOTH, DeviceInfo, format_mac
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .btmatouch.const import MA_MIN_TEMP, MA_MAX_TEMP, MAOperationMode, MAVaneMode
 from .btmatouch.exceptions import MAException
-
 from .coordinator import MACoordinator
-
+from .temperature import from_display_setpoint, to_display_room, to_display_setpoint
 from . import MAConfigEntry
 from .const import (
     DEVICE_MODEL,
@@ -32,6 +33,8 @@ from .const import (
     HA_TO_MA_HVAC,
     MA_TO_HA_FAN,
     HA_TO_MA_FAN,
+    SIGNAL_NEW_THERMOSTAT,
+    SUBENTRY_TYPE_THERMOSTAT,
 )
 
 
@@ -40,21 +43,28 @@ async def async_setup_entry(
     entry: MAConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Handle config entry setup."""
+    """Set up a climate entity per thermostat subentry, now and as ones are added."""
 
-    async_add_entities(
-        [MAClimate(entry.runtime_data.coordinator)],
+    @callback
+    def _add(subentry_id: str) -> None:
+        coordinator = entry.runtime_data.coordinators.get(subentry_id)
+        if coordinator is None:
+            return
+        async_add_entities([MAClimate(coordinator)], config_subentry_id=subentry_id)
+
+    for subentry in entry.subentries.values():
+        if subentry.subentry_type == SUBENTRY_TYPE_THERMOSTAT:
+            _add(subentry.subentry_id)
+
+    entry.async_on_unload(
+        async_dispatcher_connect(hass, f"{SIGNAL_NEW_THERMOSTAT}_{entry.entry_id}", _add)
     )
 
-async def async_unload_entry(hass: HomeAssistant, entry: MAConfigEntry) -> bool:
-    """Unload a config entry."""
-
-    return True
 
 class MAClimate(CoordinatorEntity[MACoordinator], ClimateEntity):
-    """Climate entity to represent an MA Touch thermostat."""
+    """Climate entity for an MA Touch thermostat (pull-model)."""
 
-    _attr_entity_has_name = True
+    _attr_has_entity_name = True
     _attr_name = None
     _attr_translation_key = "matouch"
 
@@ -63,35 +73,22 @@ class MAClimate(CoordinatorEntity[MACoordinator], ClimateEntity):
         | ClimateEntityFeature.TARGET_TEMPERATURE_RANGE
         | ClimateEntityFeature.FAN_MODE
         | ClimateEntityFeature.SWING_MODE
+        | ClimateEntityFeature.TURN_ON
         | ClimateEntityFeature.TURN_OFF
     )
-    _attr_precision = PRECISION_HALVES
-    _attr_temperature_unit = UnitOfTemperature.CELSIUS
-    _attr_min_temp = MA_MIN_TEMP
-    _attr_max_temp = MA_MAX_TEMP
     _attr_hvac_modes = list(HA_TO_MA_HVAC.keys())
     _attr_fan_modes = list(HA_TO_MA_FAN.keys())
     _attr_swing_modes = [SWING_ON, SWING_OFF]
 
-    _attr_hvac_mode: HVACMode | None = None
-    _attr_hvac_action: HVACAction | None = None
-    _attr_current_temperature: float | None = None
-    _attr_target_temperature: float | None = None
-    _attr_target_temperature_high: float | None = None
-    _attr_target_temperature_low: float | None = None
-    _attr_fan_mode: str | None = None
-    _attr_swing_mode: str | None = None
-
-    def __init__(self, coordinator: MACoordinator):
-        """Initialize the MA Touch entity."""
+    def __init__(self, coordinator: MACoordinator) -> None:
+        """Initialize the MA Touch climate entity."""
 
         super().__init__(coordinator)
-
-        self._config = coordinator.config_entry.runtime_data.config
-        self._attr_unique_id = f"matouch_{format_mac(self._config.mac_address)}"
+        mac = coordinator.mac_address
+        self._attr_unique_id = f"matouch_{format_mac(mac)}"
         self._attr_device_info = DeviceInfo(
-            connections={(CONNECTION_BLUETOOTH, self._config.mac_address)},
-            name=f"MA Touch {format_mac(self._config.mac_address)}",
+            connections={(CONNECTION_BLUETOOTH, format_mac(mac))},
+            name=coordinator.device_name,
             manufacturer=MANUFACTURER,
             model=DEVICE_MODEL,
             model_id=DEVICE_MODEL_ID,
@@ -99,55 +96,188 @@ class MAClimate(CoordinatorEntity[MACoordinator], ClimateEntity):
             hw_version=coordinator.firmware_version,
         )
 
+    async def async_added_to_hass(self) -> None:
+        """Back-fill device versions once the device entry exists."""
+
+        await super().async_added_to_hass()
+        self._refresh_device_versions()
+
     @callback
     def _handle_coordinator_update(self) -> None:
-        """Handle updated data from the coordinator."""
+        """Write state and back-fill versions if they only just became available."""
 
-        status = self.coordinator.data
-
-        match status.operation_mode:
-            case MAOperationMode.AUTO:
-                self._attr_min_temp = status.min_auto_temperature
-                self._attr_max_temp = status.max_auto_temperature
-                self._attr_target_temperature = None
-                self._attr_target_temperature_high = status.cool_setpoint
-                self._attr_target_temperature_low = status.heat_setpoint
-            case MAOperationMode.HEAT:
-                self._attr_min_temp = status.min_heat_temperature
-                self._attr_max_temp = status.max_heat_temperature
-                self._attr_target_temperature = status.heat_setpoint
-                self._attr_target_temperature_high = None
-                self._attr_target_temperature_low = None
-            case MAOperationMode.COOL | MAOperationMode.DRY:
-                self._attr_min_temp = status.min_cool_temperature
-                self._attr_max_temp = status.max_cool_temperature
-                self._attr_target_temperature = status.cool_setpoint
-                self._attr_target_temperature_high = None
-                self._attr_target_temperature_low = None
-            case _:
-                self._attr_target_temperature = None
-                self._attr_target_temperature_high = None
-                self._attr_target_temperature_low = None
-
-        self._attr_hvac_mode = MA_TO_HA_HVAC[status.operation_mode]
-        self._attr_hvac_action = self._get_current_hvac_action()
-        self._attr_current_temperature = status.room_temperature
-        self._attr_fan_mode = MA_TO_HA_FAN[status.fan_mode]
-        self._attr_swing_mode = SWING_ON if status.vane_mode is MAVaneMode.SWING else SWING_OFF
-
+        self._refresh_device_versions()
         super()._handle_coordinator_update()
 
-    def _get_current_hvac_action(self) -> HVACAction:
-        """Return the current hvac action."""
+    @callback
+    def _refresh_device_versions(self) -> None:
+        """Update the device registry sw/hw version after a late first connect.
 
-        status = self.coordinator.data
+        device_info is captured once at entity init; for a unit that was offline
+        at startup the versions are None then and never re-published. This pushes
+        them as soon as a connect reads them.
+        """
 
-        if status is None or status.operation_mode is MAOperationMode.OFF:
+        sw = self.coordinator.software_version
+        hw = self.coordinator.firmware_version
+        if sw is None and hw is None:
+            return
+        registry = dr.async_get(self.hass)
+        device = registry.async_get_device(
+            connections={(CONNECTION_BLUETOOTH, format_mac(self.coordinator.mac_address))}
+        )
+        if device is not None and (device.sw_version != sw or device.hw_version != hw):
+            registry.async_update_device(device.id, sw_version=sw, hw_version=hw)
+
+    @property
+    def available(self) -> bool:
+        """Tolerate a few transient poll failures before flipping unavailable.
+
+        A single adv gap / connect timeout during a proxy handoff shouldn't grey
+        the card; a genuine outage still goes unavailable promptly (after the
+        coordinator's consecutive-failure grace).
+        """
+
+        if self.coordinator.last_update_success:
+            return True
+        return self.coordinator.consecutive_failures < 3
+
+    # --- unit handling -------------------------------------------------------
+    # The device is Celsius-native (0.5°C). When HA's unit system is Fahrenheit we
+    # present °F NATIVELY using Mitsubishi's lookup table so HA performs no generic
+    # conversion (which would land on X.5°F and round, disagreeing with the physical
+    # controller by ~1°F). In °C systems everything passes through unchanged.
+
+    @property
+    def _fahrenheit(self) -> bool:
+        return self.hass.config.units.temperature_unit == UnitOfTemperature.FAHRENHEIT
+
+    @property
+    def temperature_unit(self) -> str:
+        return UnitOfTemperature.FAHRENHEIT if self._fahrenheit else UnitOfTemperature.CELSIUS
+
+    @property
+    def precision(self) -> float:
+        return PRECISION_WHOLE if self._fahrenheit else PRECISION_HALVES
+
+    @property
+    def target_temperature_step(self) -> float:
+        # Whole °F (matches the controller's °F mode) / 0.5 °C natively.
+        return PRECISION_WHOLE if self._fahrenheit else PRECISION_HALVES
+
+    def _disp_setpoint(self, celsius: float) -> float:
+        """Celsius setpoint -> displayed unit (Mitsubishi table when °F)."""
+        return to_display_setpoint(celsius, self._fahrenheit)
+
+    def _disp_room(self, celsius: float) -> float:
+        """Celsius room temp -> displayed unit (plain rounding when °F)."""
+        return to_display_room(celsius, self._fahrenheit)
+
+    def _to_celsius(self, temperature: float) -> float:
+        """Displayed-unit setpoint -> Celsius for the device (inverse table)."""
+        return from_display_setpoint(temperature, self._fahrenheit)
+
+    # --- pull-model state: read straight from coordinator.data (the Status) ---
+
+    @property
+    def _status(self):
+        return self.coordinator.data
+
+    @property
+    def hvac_mode(self) -> HVACMode | None:
+        status = self._status
+        return MA_TO_HA_HVAC.get(status.operation_mode) if status else None
+
+    @property
+    def current_temperature(self) -> float | None:
+        status = self._status
+        return self._disp_room(status.room_temperature) if status else None
+
+    @property
+    def target_temperature(self) -> float | None:
+        status = self._status
+        if status is None:
+            return None
+        match status.operation_mode:
+            case MAOperationMode.HEAT:
+                return self._disp_setpoint(status.heat_setpoint)
+            case MAOperationMode.COOL | MAOperationMode.DRY:
+                return self._disp_setpoint(status.cool_setpoint)
+            case _:
+                return None
+
+    @property
+    def target_temperature_high(self) -> float | None:
+        status = self._status
+        if status and status.operation_mode is MAOperationMode.AUTO:
+            return self._disp_setpoint(status.cool_setpoint)
+        return None
+
+    @property
+    def target_temperature_low(self) -> float | None:
+        status = self._status
+        if status and status.operation_mode is MAOperationMode.AUTO:
+            return self._disp_setpoint(status.heat_setpoint)
+        return None
+
+    @property
+    def min_temp(self) -> float:
+        status = self._status
+        if status is None:
+            return self._disp_setpoint(MA_MIN_TEMP)
+        match status.operation_mode:
+            case MAOperationMode.HEAT:
+                celsius = status.min_heat_temperature
+            case MAOperationMode.COOL | MAOperationMode.DRY:
+                celsius = status.min_cool_temperature
+            case MAOperationMode.AUTO:
+                celsius = status.min_auto_temperature
+            case _:
+                celsius = MA_MIN_TEMP
+        return self._disp_setpoint(celsius)
+
+    @property
+    def max_temp(self) -> float:
+        status = self._status
+        if status is None:
+            return self._disp_setpoint(MA_MAX_TEMP)
+        match status.operation_mode:
+            case MAOperationMode.HEAT:
+                celsius = status.max_heat_temperature
+            case MAOperationMode.COOL | MAOperationMode.DRY:
+                celsius = status.max_cool_temperature
+            case MAOperationMode.AUTO:
+                celsius = status.max_auto_temperature
+            case _:
+                celsius = MA_MAX_TEMP
+        return self._disp_setpoint(celsius)
+
+    @property
+    def fan_mode(self) -> str | None:
+        status = self._status
+        return MA_TO_HA_FAN.get(status.fan_mode) if status else None
+
+    @property
+    def swing_mode(self) -> str | None:
+        status = self._status
+        if status is None:
+            return None
+        return SWING_ON if status.vane_mode is MAVaneMode.SWING else SWING_OFF
+
+    @property
+    def hvac_action(self) -> HVACAction | None:
+        status = self._status
+        if status is None:
+            return None
+        if status.operation_mode is MAOperationMode.OFF:
             return HVACAction.OFF
-
         match status.operation_mode:
             case MAOperationMode.AUTO:
-                return HVACAction.HEATING if status.room_temperature <= status.heat_setpoint else HVACAction.COOLING if status.room_temperature >= status.cool_setpoint else HVACAction.IDLE
+                if status.room_temperature <= status.heat_setpoint:
+                    return HVACAction.HEATING
+                if status.room_temperature >= status.cool_setpoint:
+                    return HVACAction.COOLING
+                return HVACAction.IDLE
             case MAOperationMode.HEAT:
                 return HVACAction.HEATING if status.room_temperature <= status.heat_setpoint else HVACAction.IDLE
             case MAOperationMode.COOL:
@@ -157,13 +287,19 @@ class MAClimate(CoordinatorEntity[MACoordinator], ClimateEntity):
             case _:
                 return HVACAction.IDLE
 
+    # --- commands ---
+
     async def async_set_temperature(self, **kwargs: Any) -> None:
         """Set new target temperature."""
 
         status = self.coordinator.data
-
+        if status is None:
+            raise ServiceValidationError("Thermostat state not yet available")
         try:
-            if temperature := kwargs.get(ATTR_TEMPERATURE):
+            # Incoming values are in the entity's display unit; map back to the
+            # device's 0.5°C grid (inverse Mitsubishi table) before sending.
+            if (temperature := kwargs.get(ATTR_TEMPERATURE)) is not None:
+                temperature = self._to_celsius(temperature)
                 match status.operation_mode:
                     case MAOperationMode.HEAT:
                         await self.coordinator.async_set_heat_setpoint(temperature)
@@ -171,14 +307,12 @@ class MAClimate(CoordinatorEntity[MACoordinator], ClimateEntity):
                         await self.coordinator.async_set_cool_setpoint(temperature)
                     case _:
                         raise ServiceValidationError("Target setpoint is ambiguous in this mode")
-            if temperature := kwargs.get(ATTR_TARGET_TEMP_LOW):
-                await self.coordinator.async_set_heat_setpoint(temperature)
-            if temperature := kwargs.get(ATTR_TARGET_TEMP_HIGH):
-                await self.coordinator.async_set_cool_setpoint(temperature)
+            if (temperature := kwargs.get(ATTR_TARGET_TEMP_LOW)) is not None:
+                await self.coordinator.async_set_heat_setpoint(self._to_celsius(temperature))
+            if (temperature := kwargs.get(ATTR_TARGET_TEMP_HIGH)) is not None:
+                await self.coordinator.async_set_cool_setpoint(self._to_celsius(temperature))
         except MAException as ex:
             raise ServiceValidationError(f"Failed to set temperature: {ex}") from ex
-        except ValueError as ex:
-            raise ServiceValidationError("Invalid temperature") from ex
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         """Set new target HVAC mode."""
@@ -188,7 +322,7 @@ class MAClimate(CoordinatorEntity[MACoordinator], ClimateEntity):
         except MAException as ex:
             raise ServiceValidationError(f"Failed to set HVAC mode: {ex}") from ex
 
-    async def async_set_fan_mode(self, fan_mode) -> None:
+    async def async_set_fan_mode(self, fan_mode: str) -> None:
         """Set new target fan mode."""
 
         try:
@@ -196,7 +330,7 @@ class MAClimate(CoordinatorEntity[MACoordinator], ClimateEntity):
         except MAException as ex:
             raise ServiceValidationError(f"Failed to set fan mode: {ex}") from ex
 
-    async def async_set_swing_mode(self, swing_mode) -> None:
+    async def async_set_swing_mode(self, swing_mode: str) -> None:
         """Set new target swing operation."""
 
         try:

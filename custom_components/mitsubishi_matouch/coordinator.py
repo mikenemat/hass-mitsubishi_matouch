@@ -1,10 +1,14 @@
 """Data update coordinator for Mitsubishi MA Touch thermostats."""
 
 import logging
+import random
+import time
+import asyncio
 from datetime import timedelta
 from dataclasses import replace
 
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.components import bluetooth
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed, ConfigEntryAuthFailed
 
 from bleak.backends.device import BLEDevice
@@ -14,32 +18,63 @@ from .btmatouch.thermostat import Status, Thermostat
 from .btmatouch.exceptions import MAException, MAAuthException, MAControlRequestFailedException
 
 from .models import MAConfigEntry
+from .proxy_balancer import MAProxyBalancer
+from .telemetry import MATelemetryLog
+from .const import MAX_BACKOFF_INTERVAL
 
 _LOGGER = logging.getLogger(__name__)
+
+# Upper bound on a single (re)connect+login so a marginal link can't stall polling.
+_CONNECT_TIMEOUT = 25
+# Minimum seconds between persisting repeated identical poll failures to the file.
+_FAILURE_LOG_INTERVAL = 60
 
 
 class MACoordinator(DataUpdateCoordinator):
     """Mitsubishi MA Touch data update coordinator."""
 
-    def __init__(self, hass: HomeAssistant, config_entry: MAConfigEntry, pin: str, scan_interval: int, ble_device: BLEDevice):
+    def __init__(self, hass: HomeAssistant, config_entry: MAConfigEntry, pin: str, scan_interval: int, address: str, ble_device: BLEDevice | None, balancer: MAProxyBalancer, telemetry: MATelemetryLog, name: str, log_polls: bool = False, capture_raw_frames: bool = False):
         """Initialize the coordinator."""
 
         super().__init__(
             hass,
             _LOGGER,
             # Name of the data. For logging purposes.
-            name=ble_device.address,
+            name=address,
             config_entry=config_entry,
             # Polling interval. Will only be polled if there are subscribers.
             update_interval=timedelta(seconds=scan_interval),
-            # Set always_update to `False` if the data returned from the
-            # api can be compared via `__eq__` to avoid duplicate updates
-            # being dispatched to listeners
+            # Dispatch on every poll so the diagnostic/telemetry sensors (uptime,
+            # latency, active proxy, ...) refresh even when the thermostat Status
+            # itself is unchanged. (Setting False left climate stuck "unknown".)
             always_update=True,
         )
 
+        self._mac_address = address
+        self.device_name = name
+        self._balancer = balancer
+        self._telemetry = telemetry
+        self._log_polls = log_polls
+        self._capture_raw_frames = capture_raw_frames
+        # Base poll cadence + exponential-backoff state (so an unreachable unit or
+        # a saturated proxy is not hammered every interval during an outage).
+        self._base_interval = scan_interval
+        self._fail_streak = 0
+        # Set by async_rebalance(); honored at the top of the next (serialized)
+        # poll so the re-pick happens under the coordinator's refresh lock.
+        self._force_repick = False
+        self._prev_connect_count = 0
+        self._prev_disconnect_count = 0
+        self._prev_status_hex: str | None = None
+        self._last_fail_persist: float | None = None
+        self._last_fail_error: str | None = None
+        self.active_proxy: str | None = None
+        self._active_source: str | None = None
+        self.active_rssi: int | None = None
+        self.last_poll_duration: float | None = None
         self._thermostat = Thermostat(
             pin=int(pin, 16),
+            address=address,
             ble_device=ble_device,
         )
         self._target_heat_setpoint: float | None = None
@@ -60,6 +95,139 @@ class MACoordinator(DataUpdateCoordinator):
 
         return self._thermostat.software_version
 
+    @property
+    def reconnects(self) -> int:
+        """Reconnects since startup (successful connects after the first)."""
+
+        return max(0, self._thermostat.connect_count - 1)
+
+    @property
+    def disconnects(self) -> int:
+        """Disconnect events observed since startup."""
+
+        return self._thermostat.disconnect_count
+
+    @property
+    def connection_uptime(self) -> float | None:
+        """Seconds the current BLE connection has been alive, or None if down."""
+
+        return self._thermostat.connection_uptime
+
+    @property
+    def mac_address(self) -> str:
+        """The thermostat's BLE MAC address."""
+
+        return self._mac_address
+
+    @property
+    def active_source(self) -> str | None:
+        """Proxy source (MAC) actually serving the live connection."""
+
+        return self._active_source
+
+    @property
+    def connected(self) -> bool:
+        """Whether the thermostat currently has a live BLE connection."""
+
+        return self._thermostat.is_connected
+
+    @property
+    def consecutive_failures(self) -> int:
+        """Number of back-to-back failed polls (0 once a poll succeeds)."""
+
+        return self._fail_streak
+
+    @callback
+    def _clear_active_proxy(self) -> None:
+        """Forget the serving proxy once the link is down so the diagnostic
+        sensors don't report a stale dead proxy through an outage (R10)."""
+
+        self._active_source = None
+        self.active_proxy = None
+        self.active_rssi = None
+
+    @callback
+    def _apply_backoff(self) -> None:
+        """Grow the poll interval on repeated failures (exp backoff + jitter)."""
+
+        self._fail_streak += 1
+        exp = min(self._fail_streak - 1, 4)
+        delay = min(self._base_interval * (2 ** exp), MAX_BACKOFF_INTERVAL)
+        # Jitter de-synchronizes the fleet so they don't all re-hit a returning
+        # proxy on the same tick.
+        delay += random.uniform(0, self._base_interval)
+        self.update_interval = timedelta(seconds=delay)
+
+    @callback
+    def _reset_backoff(self) -> None:
+        """Restore the base poll cadence after a success."""
+
+        if self._fail_streak:
+            self._fail_streak = 0
+            self.update_interval = timedelta(seconds=self._base_interval)
+
+    @callback
+    def request_immediate_retry(self) -> None:
+        """Reset backoff and poll now (used when a proxy comes back online so a
+        backed-off device recovers ASAP instead of waiting out its backoff).
+
+        Skips an auth-failed device: a returning proxy doesn't fix a bad PIN, so
+        resetting its backoff would just resume hammering connect+login against a
+        wrong PIN on every proxy flap (defeats the auth backoff).
+        """
+
+        if self._last_fail_error == "auth":
+            return
+        self._reset_backoff()
+        self.hass.async_create_task(self.async_request_refresh())
+
+    @callback
+    def apply_options(self, scan_interval: int, log_polls: bool, capture_raw_frames: bool) -> None:
+        """Apply changed integration options live, without dropping the link.
+
+        Lets the user toggle verbose/raw-frame logging or the poll cadence (e.g.
+        when capturing an error) without bouncing every thermostat's connection.
+        """
+
+        self._log_polls = log_polls
+        self._capture_raw_frames = capture_raw_frames
+        if scan_interval != self._base_interval:
+            self._base_interval = scan_interval
+            # Only retake the cadence immediately if we're not mid-backoff; a
+            # backed-off device picks up the new base on its next success.
+            if self._fail_streak == 0:
+                self.update_interval = timedelta(seconds=scan_interval)
+
+    @callback
+    def _note_connection_source(self) -> None:
+        """Record the proxy actually serving the live link (advertisement-based
+        lookups can't see a connected device) for accurate telemetry + balancing."""
+
+        # Prefer the source the live link reports; if the backend doesn't expose
+        # it (some scanners / mid-reconnect), fall back to the proxy pick() chose
+        # so the device still counts in the load map instead of going invisible.
+        source = self._thermostat.connected_source or self._balancer.assigned_source(self._mac_address)
+        if not source:
+            return
+        self._active_source = source
+        scanner = bluetooth.async_scanner_by_source(self.hass, source)
+        name = getattr(scanner, "name", None)
+        self.active_proxy = f"{name} ({source})" if name else source
+        self._balancer.note_connected(self._mac_address, source)
+
+    async def async_rebalance(self) -> None:
+        """Request a proxy re-pick on the next poll.
+
+        Routed through the coordinator's own refresh (flag + request_refresh)
+        rather than closing the link out-of-band: the disconnect/re-pick runs at
+        the top of the next poll, under the refresh lock, so it can't race an
+        in-flight status read. (request_refresh may coalesce with a poll already
+        due; the per-device cooldown in the caller bounds re-bounce regardless.)
+        """
+
+        self._force_repick = True
+        await self.async_request_refresh()
+
     async def _async_setup(self) -> None:
         """Set up the coordinator
 
@@ -71,68 +239,137 @@ class MACoordinator(DataUpdateCoordinator):
         """
 
     async def _async_update_data(self) -> Status:
-        """Fetch data from API endpoint.
+        """Fetch the latest status over a persistent BLE connection.
 
-        This is the place to pre-process the data to lookup tables
-        so entities can quickly look up their data.
+        The connection is established once and reused across polls (see
+        Thermostat.async_ensure_connected); on any link error we drop it so the
+        next poll reconnects cleanly. This keeps per-poll cost to a single status
+        round-trip, which is what allows several devices to share the radios.
         """
 
+        # Rebalance was requested: drop the current link (under this refresh lock,
+        # so no concurrent poll is mid-status-read) so the pick() below re-routes
+        # us onto the least-loaded reachable proxy.
+        if self._force_repick:
+            self._force_repick = False
+            if self._thermostat.is_connected:
+                self._balancer.release(self._mac_address)
+                await self._thermostat.async_close()
+                self._clear_active_proxy()
+
+        # Only (re)select a proxy when we actually need to connect. While the
+        # persistent connection is up the device isn't advertising, so the
+        # advertisement-based balancer can't see it - re-picking then would wipe
+        # active_proxy/rssi and drop the balancer's load assignment. Never clobber
+        # a known value with None.
+        if not self._thermostat.is_connected:
+            ble_device, proxy, rssi = self._balancer.pick(self._mac_address)
+            if ble_device is not None:
+                self._thermostat.set_ble_device(ble_device)
+            if proxy is not None:
+                self.active_proxy = proxy
+            if rssi is not None:
+                self.active_rssi = rssi
+            if ble_device is None:
+                # Not currently seen by any proxy: don't hammer establish_connection
+                # on an absent/powered-off unit (which would waste airtime and
+                # degrade the proxies for live units). Wait until it advertises,
+                # and back off the cadence so a long outage isn't polled every tick.
+                self._clear_active_proxy()
+                await self._record_poll(False, error="not_discoverable")
+                self._apply_backoff()
+                raise UpdateFailed(f"{self._mac_address} is not currently discoverable")
+
+        started = time.monotonic()
         try:
-            # Note: asyncio.TimeoutError and aiohttp.ClientError are already
-            # handled by the data update coordinator.
-            async with self._thermostat as thermostat:
-                # Process pending control updates. Clear queued values only after
-                # successful write so transient failures can be retried.
-                if (heat_setpoint := self._target_heat_setpoint) is not None:
-                    try:
-                        await thermostat.async_set_heat_setpoint(heat_setpoint)
-                        self._target_heat_setpoint = None
-                    except MAControlRequestFailedException:
-                        self._target_heat_setpoint = None
-                        raise
+            async with asyncio.timeout(_CONNECT_TIMEOUT):
+                await self._thermostat.async_ensure_connected()
+            self._note_connection_source()
 
-                if (cool_setpoint := self._target_cool_setpoint) is not None:
-                    try:
-                        await thermostat.async_set_cool_setpoint(cool_setpoint)
-                        self._target_cool_setpoint = None
-                    except MAControlRequestFailedException:
-                        self._target_cool_setpoint = None
-                        raise
+            # Process pending control updates over the live connection. Clear a
+            # queued value only after a successful write so failures can retry.
+            if (heat_setpoint := self._target_heat_setpoint) is not None:
+                try:
+                    await self._thermostat.async_set_heat_setpoint(heat_setpoint)
+                    self._target_heat_setpoint = None
+                except MAControlRequestFailedException:
+                    self._target_heat_setpoint = None
+                    raise
 
-                if (operation_mode := self._target_operation_mode) is not None:
-                    try:
-                        await thermostat.async_set_operation_mode(operation_mode)
-                        self._target_operation_mode = None
-                    except MAControlRequestFailedException:
-                        self._target_operation_mode = None
-                        raise
+            if (cool_setpoint := self._target_cool_setpoint) is not None:
+                try:
+                    await self._thermostat.async_set_cool_setpoint(cool_setpoint)
+                    self._target_cool_setpoint = None
+                except MAControlRequestFailedException:
+                    self._target_cool_setpoint = None
+                    raise
 
-                if (fan_mode := self._target_fan_mode) is not None:
-                    try:
-                        await thermostat.async_set_fan_mode(fan_mode)
-                        self._target_fan_mode = None
-                    except MAControlRequestFailedException:
-                        self._target_fan_mode = None
-                        raise
+            if (operation_mode := self._target_operation_mode) is not None:
+                try:
+                    await self._thermostat.async_set_operation_mode(operation_mode)
+                    self._target_operation_mode = None
+                except MAControlRequestFailedException:
+                    self._target_operation_mode = None
+                    raise
 
-                if (vane_mode := self._target_vane_mode) is not None:
-                    try:
-                        await thermostat.async_set_vane_mode(vane_mode)
-                        self._target_vane_mode = None
-                    except MAControlRequestFailedException:
-                        self._target_vane_mode = None
-                        raise
+            if (fan_mode := self._target_fan_mode) is not None:
+                try:
+                    await self._thermostat.async_set_fan_mode(fan_mode)
+                    self._target_fan_mode = None
+                except MAControlRequestFailedException:
+                    self._target_fan_mode = None
+                    raise
 
-                status = await thermostat.async_get_status()
-                return self._apply_pending_targets_to_status(status)
+            if (vane_mode := self._target_vane_mode) is not None:
+                try:
+                    await self._thermostat.async_set_vane_mode(vane_mode)
+                    self._target_vane_mode = None
+                except MAControlRequestFailedException:
+                    self._target_vane_mode = None
+                    raise
+
+            status = await self._thermostat.async_get_status()
+            self.last_poll_duration = time.monotonic() - started
+            result = self._apply_pending_targets_to_status(status)
+            self._reset_backoff()
+            await self._record_poll(
+                True,
+                room_temperature=status.room_temperature,
+                operation_mode=str(status.operation_mode),
+            )
+            return result
         except MAAuthException as ex:
-            raise UpdateFailed(f"Authentication failed: {ex}") from ex
-            # Raising ConfigEntryAuthFailed will cancel future updates
-            # and start a config flow with SOURCE_REAUTH (async_step_reauth)
-            # raise ConfigEntryAuthFailed from ex
+            # Wrong PIN: keep this thermostat unavailable with a clear error. In
+            # the subentry model there is no per-device reauth flow; the user
+            # fixes the PIN via the thermostat's "reconfigure" action. Back off so
+            # we don't churn reconnect+login attempts against a bad PIN every tick.
+            await self._thermostat.async_close()
+            self._clear_active_proxy()
+            self._clear_pending_targets()
+            await self._record_poll(False, error="auth", detail=str(ex))
+            self._apply_backoff()
+            raise UpdateFailed(f"Authentication failed (check PIN): {ex}") from ex
         except MAControlRequestFailedException as ex:
+            # Device rejected the control, but the link is healthy - keep it and
+            # don't back off (this isn't a connectivity problem).
+            await self._record_poll(False, error="control", detail=str(ex))
             raise UpdateFailed(f"Control request failed: {ex}") from ex
+        except TimeoutError as ex:
+            # connect+login exceeded _CONNECT_TIMEOUT - drop and retry (backed off).
+            await self._thermostat.async_close()
+            self._clear_active_proxy()
+            self._clear_pending_targets()
+            await self._record_poll(False, error="connect_timeout", detail=str(ex))
+            self._apply_backoff()
+            raise UpdateFailed(f"Connection timed out: {ex}") from ex
         except MAException as ex:
+            # Any other protocol/link error: drop the connection so the next
+            # poll reconnects cleanly, and back off the cadence during an outage.
+            await self._thermostat.async_close()
+            self._clear_active_proxy()
+            self._clear_pending_targets()
+            await self._record_poll(False, error="link", detail=str(ex))
+            self._apply_backoff()
             raise UpdateFailed(f"Error communicating with thermostat: {ex}") from ex
 
     def _apply_optimistic_update(self, **changes) -> None:
@@ -164,6 +401,16 @@ class MACoordinator(DataUpdateCoordinator):
             return status
 
         return replace(status, **changes)
+
+    def _clear_pending_targets(self) -> None:
+        """Drop queued control targets (e.g. after a lost/failed connection) so a
+        never-confirmed command stops overlaying phantom state on the entity."""
+
+        self._target_heat_setpoint = None
+        self._target_cool_setpoint = None
+        self._target_operation_mode = None
+        self._target_fan_mode = None
+        self._target_vane_mode = None
 
     def _raise_if_control_request_failed(self) -> None:
         """Raise control request failures from the latest refresh for service handling."""
@@ -215,3 +462,87 @@ class MACoordinator(DataUpdateCoordinator):
         self._apply_optimistic_update(vane_mode=vane_mode)
         await self.async_request_refresh()
         self._raise_if_control_request_failed()
+
+    async def async_close_connection(self) -> None:
+        """Disconnect the persistent BLE connection (called on unload)."""
+
+        await self._thermostat.async_close()
+        self._balancer.release(self._mac_address)
+        self._clear_active_proxy()
+
+    async def _record_poll(self, success: bool, **extra) -> None:
+        """Emit telemetry for this poll plus any connect/disconnect transitions."""
+
+        thermostat = self._thermostat
+
+        if thermostat.connect_count != self._prev_connect_count:
+            self._prev_connect_count = thermostat.connect_count
+            await self._telemetry.record(
+                "connect",
+                self._mac_address,
+                proxy=self.active_proxy,
+                rssi=self.active_rssi,
+                connect_count=thermostat.connect_count,
+            )
+
+        if thermostat.disconnect_count != self._prev_disconnect_count:
+            self._prev_disconnect_count = thermostat.disconnect_count
+            await self._telemetry.record(
+                "disconnect",
+                self._mac_address,
+                disconnect_count=thermostat.disconnect_count,
+                last_uptime_s=(
+                    round(thermostat.last_disconnect_uptime)
+                    if thermostat.last_disconnect_uptime is not None
+                    else None
+                ),
+            )
+
+        # Capture the full raw STATUS frame only when it changes AND only if raw
+        # capture is enabled (off by default - keeps the file lean for 24/7).
+        fields = dict(extra)
+        if self._capture_raw_frames:
+            status_hex = thermostat.last_status_hex
+            if success and status_hex and status_hex != self._prev_status_hex:
+                fields["status_hex"] = status_hex
+                self._prev_status_hex = status_hex
+
+        # Decide what reaches the JSONL file. The in-memory ring buffer keeps every
+        # poll regardless. Successful polls are persisted only in verbose mode;
+        # failures are persisted but identical repeats are coalesced (persist on
+        # transition, then at most once per _FAILURE_LOG_INTERVAL) so a flapping
+        # unit can't self-erase the file over a multi-hour storm.
+        if success:
+            self._last_fail_persist = None
+            self._last_fail_error = None
+            persist = self._log_polls
+        else:
+            error = extra.get("error")
+            now = time.monotonic()
+            persist = (
+                error != self._last_fail_error
+                or self._last_fail_persist is None
+                or (now - self._last_fail_persist) >= _FAILURE_LOG_INTERVAL
+            )
+            if persist:
+                self._last_fail_persist = now
+                self._last_fail_error = error
+
+        uptime = thermostat.connection_uptime
+        await self._telemetry.record(
+            "poll" if success else "poll_failed",
+            self._mac_address,
+            persist,
+            ok=success,
+            proxy=self.active_proxy,
+            rssi=self.active_rssi,
+            latency_ms=(
+                round(self.last_poll_duration * 1000)
+                if success and self.last_poll_duration is not None
+                else None
+            ),
+            uptime_s=round(uptime) if uptime is not None else None,
+            reconnects=max(0, thermostat.connect_count - 1),
+            disconnects=thermostat.disconnect_count,
+            **fields,
+        )

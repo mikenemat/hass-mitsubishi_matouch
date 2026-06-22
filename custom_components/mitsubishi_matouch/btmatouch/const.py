@@ -30,6 +30,9 @@ DEFAULT_COMMAND_TIMEOUT = 5
 """The default response wait timeout in seconds."""
 DEFAULT_RESPONSE_TIMEOUT = 5
 
+"""Keepalive read interval in seconds. Must be < the device's ~16s idle-disconnect."""
+DEFAULT_KEEPALIVE_INTERVAL = 10
+
 
 class MAOperationMode(IntEnum):
     """Operation mode enumeration."""

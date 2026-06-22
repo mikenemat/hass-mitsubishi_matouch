@@ -13,6 +13,13 @@ from .btmatouch.const import MAOperationMode, MAFanMode
 
 DOMAIN = "mitsubishi_matouch"
 
+SUBENTRY_TYPE_THERMOSTAT = "thermostat"
+# Units advertise as "M/R_CT01MAU_<machex>" (and "M/R_CT01MA_<machex>" on some),
+# so match the "CT01MA" model designation as a substring, not a strict prefix.
+MA_TOUCH_NAME_MATCH = "CT01MA"
+# Note: this is a GATT service, NOT advertised — kept only as a secondary hint.
+MA_TOUCH_SERVICE_UUID = "0277df18-e796-11e6-bf01-fe55135034f3"
+
 MANUFACTURER = "Mitsubishi Electric"
 DEVICE_MODEL = "MA Touch"
 DEVICE_MODEL_ID = "PAR-CT01MAU"
@@ -51,4 +58,23 @@ HA_TO_MA_FAN: dict[str, MAFanMode] = {
     "quiet": MAFanMode.QUIET,
 }
 
-DEFAULT_SCAN_INTERVAL = 10 # seconds
+DEFAULT_SCAN_INTERVAL = 10 # seconds; cheap now that the connection is persistent (keepalive holds it)
+
+# When balancing across proxies, skip proxies that hear the device weaker than
+# this (dBm), unless no stronger proxy can reach it.
+PROXY_RSSI_FLOOR = -90
+
+# Dispatcher signal (namespaced per entry) fired when a thermostat subentry is
+# added at runtime so the platforms create its entities without a parent reload.
+SIGNAL_NEW_THERMOSTAT = "mitsubishi_matouch_new_thermostat"
+
+# Active-rebalance tuning. Rebalance is event-driven (proxy online/offline) with a
+# slow periodic backstop; a debouncer coalesces bursts and serializes runs.
+REBALANCE_INTERVAL = 600       # slow periodic backstop (seconds)
+REBALANCE_COOLDOWN = 1800      # min seconds before re-bouncing the same device
+REBALANCE_DEBOUNCE = 5.0       # coalesce a burst of proxy events into one run
+REBALANCE_STEP_DELAY = 6.0     # let a bounced device reconnect before re-evaluating
+
+# Per-coordinator exponential backoff cap (seconds) on repeated connect/link
+# failures, so an unreachable unit / saturated proxy is not hammered every poll.
+MAX_BACKOFF_INTERVAL = 120

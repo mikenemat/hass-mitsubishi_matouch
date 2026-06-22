@@ -1,27 +1,81 @@
 {
   "config": {
-    "abort": {
-      "already_configured": "[%key:common::config_flow::abort::already_configured_device%]"
+    "flow_title": "Mitsubishi MA Touch",
+    "progress": {
+      "searching": "Searching for MA Touch thermostats… This continues automatically and advances as soon as one appears. Make sure your thermostats are powered and within range of a Bluetooth proxy."
     },
-    "flow_title": "Mitsubishi MA Touch {mac}",
     "step": {
-      "user": {
-        "title": "Configure New Thermostat",
+      "pick": {
+        "title": "Add Mitsubishi MA Touch thermostats",
+        "description": "Select the thermostats to add. They are discovered automatically by their CT01MA name via your Bluetooth proxies.",
         "data": {
-          "mac": "MAC address",
-          "pin": "PIN"
+          "address": "Thermostats"
         }
       },
-      "confirm_bluetooth": {
-        "title": "Configure New Thermostat",
+      "retry": {
+        "title": "No thermostats found yet",
+        "description": "No MA Touch thermostats are visible yet. Make sure they are powered and within range of a Bluetooth proxy, then submit to search again."
+      },
+      "device": {
+        "title": "Configure thermostat",
+        "description": "Set a name and the PIN (the password shown on the controller) for {device}.",
         "data": {
+          "name": "Name",
           "pin": "PIN"
         }
       }
     },
+    "abort": {
+      "no_devices_found": "No MA Touch thermostats found nearby. Make sure they are powered and within range of a Bluetooth proxy, then try again.",
+      "already_configured": "[%key:common::config_flow::abort::already_configured_device%]"
+    },
     "error": {
-      "invalid_mac_address": "Invalid MAC address",
-      "invalid_pin": "Invalid PIN"
+      "invalid_pin": "PIN must be 4 digits"
+    }
+  },
+  "config_subentries": {
+    "thermostat": {
+      "initiate_flow": {
+        "user": "Add thermostat"
+      },
+      "entry_type": "Thermostat",
+      "step": {
+        "user": {
+          "title": "Add thermostat",
+          "description": "Select a thermostat and set its name and PIN. If none are listed yet, submit to search again.",
+          "data": {
+            "address": "Thermostat",
+            "name": "Name",
+            "pin": "PIN"
+          }
+        },
+        "reconfigure": {
+          "title": "Edit thermostat",
+          "data": {
+            "name": "Name",
+            "pin": "PIN"
+          }
+        }
+      },
+      "abort": {
+        "already_configured": "[%key:common::config_flow::abort::already_configured_device%]"
+      },
+      "error": {
+        "invalid_pin": "PIN must be 4 digits",
+        "no_devices_found": "No new MA Touch thermostats are visible yet. Make sure they are powered and within range of a Bluetooth proxy, then submit to search again."
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Mitsubishi MA Touch options",
+        "data": {
+          "scan_interval": "Polling interval (seconds)",
+          "log_polls": "Log every poll to the telemetry file (verbose)",
+          "capture_raw_frames": "Capture raw status frames (for debugging)"
+        }
+      }
     }
   },
   "entity": {

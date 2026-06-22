@@ -1,116 +1,348 @@
-"""Config flow for the Mitsubishi MA Touch integration."""
+"""Config flow for the Mitsubishi MA Touch integration.
 
+Architecture: one parent config entry (the integration) + one "thermostat" config
+subentry per device. The parent flow scans for MA Touch (CT01MA*) devices with a
+live progress spinner that auto-advances the moment any are found, and lets the
+user add several at once (name + PIN each). Thermostats can be added/edited/removed
+later via the subentry flow without disturbing the others.
+"""
+
+from __future__ import annotations
+
+import asyncio
 from typing import Any
 
-from homeassistant.components.bluetooth import BluetoothServiceInfoBleak
-from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
-from homeassistant.const import CONF_MAC, CONF_PIN
-from homeassistant.helpers.device_registry import format_mac
+import voluptuous as vol
 
-from .const import DOMAIN
-from .schemas import SCHEMA_BLUETOOTH, SCHEMA_USER
+from homeassistant.components.bluetooth import (
+    BluetoothServiceInfoBleak,
+    async_discovered_service_info,
+)
+from homeassistant.config_entries import (
+    ConfigEntry,
+    ConfigFlow,
+    ConfigFlowResult,
+    ConfigSubentryData,
+    ConfigSubentryFlow,
+    OptionsFlow,
+    SubentryFlowResult,
+)
+from homeassistant.const import CONF_ADDRESS, CONF_NAME, CONF_PIN
+from homeassistant.core import callback
+from homeassistant.helpers.selector import (
+    SelectOptionDict,
+    SelectSelector,
+    SelectSelectorConfig,
+    SelectSelectorMode,
+)
+
+from .const import (
+    DEFAULT_SCAN_INTERVAL,
+    DOMAIN,
+    MA_TOUCH_NAME_MATCH,
+    MA_TOUCH_SERVICE_UUID,
+    SUBENTRY_TYPE_THERMOSTAT,
+)
+
+# Auto-search: poll discovery this many times, this far apart, advancing as soon
+# as anything is found (so a unit that needs a moment to advertise still shows up).
+_DISCOVERY_ROUNDS = 30
+_DISCOVERY_DELAY = 2.0
+
+
+def _is_matouch(info: BluetoothServiceInfoBleak) -> bool:
+    """Return whether an advertised device looks like an MA Touch controller.
+
+    Matches the "CT01MA" model substring in the advertised name (real names look
+    like "M/R_CT01MAU_<machex>" / "M/R_CT01MA_<machex>"). The service UUID is
+    GATT-only (not advertised), so it's only a secondary hint.
+    """
+
+    if MA_TOUCH_SERVICE_UUID in (info.service_uuids or []):
+        return True
+    return MA_TOUCH_NAME_MATCH in (info.name or "").upper()
+
+
+def _valid_pin(pin: str) -> bool:
+    """Return whether the PIN is 4 digits."""
+
+    return pin.isdigit() and len(pin) == 4
+
+
+def _device_options(devices: dict[str, BluetoothServiceInfoBleak]) -> list[SelectOptionDict]:
+    return [
+        SelectOptionDict(value=address, label=f"{(info.name or 'MA Touch')} ({address})")
+        for address, info in devices.items()
+    ]
+
+
+async def _collect_matouch(hass, found: dict[str, BluetoothServiceInfoBleak], exclude: set[str]) -> None:
+    """Poll discovery until at least one (new) MA Touch device is found, or timeout."""
+
+    for _ in range(_DISCOVERY_ROUNDS):
+        for info in async_discovered_service_info(hass, connectable=True):
+            if info.address not in exclude and _is_matouch(info):
+                found[info.address] = info
+        if found:
+            return
+        await asyncio.sleep(_DISCOVERY_DELAY)
 
 
 class MAConfigFlow(ConfigFlow, domain=DOMAIN):
-    """Config flow for Mitsubishi MA Touch thermostats."""
+    """Parent config flow for Mitsubishi MA Touch."""
 
     def __init__(self) -> None:
         """Initialize the config flow."""
 
-        self._discovery_info: BluetoothServiceInfoBleak | None = None
+        self._discovered: dict[str, BluetoothServiceInfoBleak] = {}
+        self._discover_task: asyncio.Task | None = None
+        self._pending: list[str] = []
+        self._collected: dict[str, dict[str, Any]] = {}
 
-    async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        """Handle a flow initialized by the user."""
+    @classmethod
+    @callback
+    def async_get_supported_subentry_types(
+        cls, config_entry: ConfigEntry
+    ) -> dict[str, type[ConfigSubentryFlow]]:
+        """Thermostats are added as subentries under the parent entry."""
 
-        errors: dict[str, str] = {}
-        if user_input is None:
-            return self.async_show_form(
-                step_id="user",
-                data_schema=SCHEMA_USER,
-                errors=errors,
-            )
-
-        mac_address = format_mac(user_input[CONF_MAC])
-        if not validate_mac(mac_address):
-            errors[CONF_MAC] = "invalid_mac_address"
-            return self.async_show_form(
-                step_id="user",
-                data_schema=SCHEMA_USER,
-                errors=errors,
-            )
-
-        pin = user_input[CONF_PIN]
-        if not validate_pin(pin):
-            errors[CONF_PIN] = "invalid_pin"
-            return self.async_show_form(
-                step_id="user",
-                data_schema=SCHEMA_USER,
-                errors=errors,
-            )
-            
-        await self.async_set_unique_id(mac_address)
-        self._abort_if_unique_id_configured(updates=user_input)
-
-        return self.async_create_entry(
-            title=f"MA Touch {mac_address}",
-            data={"mac_address": mac_address, "pin": pin},
-        )
+        return {SUBENTRY_TYPE_THERMOSTAT: ThermostatSubentryFlowHandler}
 
     async def async_step_bluetooth(self, discovery_info: BluetoothServiceInfoBleak) -> ConfigFlowResult:
-        """Handle bluetooth discovery."""
+        """Handle a device discovered over Bluetooth (single-instance parent)."""
 
-        self._discovery_info = discovery_info
+        await self.async_set_unique_id(DOMAIN)
+        self._abort_if_unique_id_configured()
+        if _is_matouch(discovery_info):
+            self._discovered[discovery_info.address] = discovery_info
+        self.context["title_placeholders"] = {"name": "Mitsubishi MA Touch"}
+        return await self.async_step_user()
 
-        await self.async_set_unique_id(discovery_info.address)
+    async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """Auto-search for thermostats with a live progress spinner."""
+
+        await self.async_set_unique_id(DOMAIN, raise_on_progress=False)
         self._abort_if_unique_id_configured()
 
-        self.context.update({"title_placeholders": {"name": discovery_info.name}})
+        if self._discover_task is None:
+            self._discover_task = self.hass.async_create_task(
+                _collect_matouch(self.hass, self._discovered, set())
+            )
 
-        return await self.async_step_bluetooth_confirm()
+        if not self._discover_task.done():
+            return self.async_show_progress(
+                step_id="user",
+                progress_action="searching",
+                progress_task=self._discover_task,
+            )
 
-    async def async_step_bluetooth_confirm(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        """Handle flow start."""
+        self._discover_task = None
+        return self.async_show_progress_done(
+            next_step_id="pick" if self._discovered else "retry"
+        )
 
-        mac_address = self._discovery_info.address
+    async def async_step_retry(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """Shown when no thermostats were found; submitting searches again."""
+
+        if user_input is not None:
+            self._discovered = {}
+            return await self.async_step_user()
+        return self.async_show_form(step_id="retry", data_schema=vol.Schema({}))
+
+    async def async_step_pick(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """Pick which discovered thermostats to add."""
+
+        if user_input is not None:
+            self._pending = list(user_input[CONF_ADDRESS])
+            self._collected = {}
+            return await self.async_step_device()
+
+        return self.async_show_form(
+            step_id="pick",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_ADDRESS): SelectSelector(
+                        SelectSelectorConfig(
+                            options=_device_options(self._discovered),
+                            mode=SelectSelectorMode.LIST,
+                            multiple=True,
+                            sort=True,
+                        )
+                    ),
+                }
+            ),
+        )
+
+    async def async_step_device(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """Collect a name + PIN for each selected thermostat, one at a time."""
 
         errors: dict[str, str] = {}
-        if user_input is None:
-            return self.async_show_form(
-                step_id="bluetooth_confirm",
-                data_schema=SCHEMA_BLUETOOTH,
-                description_placeholders={CONF_MAC: mac_address},
-                errors=errors,
+        if user_input is not None:
+            address = self._pending[0]
+            pin = user_input[CONF_PIN]
+            if not _valid_pin(pin):
+                errors[CONF_PIN] = "invalid_pin"
+            else:
+                self._collected[address] = {
+                    CONF_NAME: user_input[CONF_NAME],
+                    CONF_PIN: pin,
+                    CONF_ADDRESS: address,
+                }
+                self._pending.pop(0)
+
+        if not self._pending:
+            return self.async_create_entry(
+                title="Mitsubishi MA Touch",
+                data={},
+                subentries=[
+                    ConfigSubentryData(
+                        subentry_type=SUBENTRY_TYPE_THERMOSTAT,
+                        title=info[CONF_NAME],
+                        unique_id=address,
+                        data=info,
+                    )
+                    for address, info in self._collected.items()
+                ],
             )
 
-        pin = user_input[CONF_PIN]
-        if not validate_pin(pin):
-            errors[CONF_PIN] = "invalid_pin"
+        address = self._pending[0]
+        info = self._discovered.get(address)
+        default_name = (info.name if info else None) or f"MA Touch {address}"
+        return self.async_show_form(
+            step_id="device",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_NAME, default=default_name): str,
+                    vol.Required(CONF_PIN): str,
+                }
+            ),
+            description_placeholders={"device": f"{default_name} ({address})"},
+            errors=errors,
+        )
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(config_entry: ConfigEntry) -> OptionsFlow:
+        """Return the options flow handler."""
+
+        return MAOptionsFlow()
+
+
+class ThermostatSubentryFlowHandler(ConfigSubentryFlow):
+    """Add or reconfigure a single thermostat subentry."""
+
+    def __init__(self) -> None:
+        """Initialize the subentry flow."""
+
+        self._discovered: dict[str, BluetoothServiceInfoBleak] = {}
+
+    async def async_step_user(self, user_input: dict[str, Any] | None = None) -> SubentryFlowResult:
+        """Add a thermostat: scan for new CT01MA devices, collect name + PIN.
+
+        Re-scans on every entry to this step, so an empty result is retryable
+        (submit to search again) rather than a dead end.
+        """
+
+        entry = self._get_entry()
+        existing = {se.data.get(CONF_ADDRESS) for se in entry.subentries.values()}
+        for info in async_discovered_service_info(self.hass, connectable=True):
+            if info.address not in existing and _is_matouch(info):
+                self._discovered[info.address] = info
+
+        errors: dict[str, str] = {}
+        if user_input is not None and self._discovered:
+            pin = user_input.get(CONF_PIN, "")
+            if not _valid_pin(pin):
+                errors[CONF_PIN] = "invalid_pin"
+            else:
+                address = user_input[CONF_ADDRESS]
+                return self.async_create_entry(
+                    title=user_input[CONF_NAME],
+                    data={
+                        CONF_NAME: user_input[CONF_NAME],
+                        CONF_PIN: pin,
+                        CONF_ADDRESS: address,
+                    },
+                    unique_id=address,
+                )
+
+        if not self._discovered:
+            # Retryable: an empty form whose submit re-runs this step (re-scans).
             return self.async_show_form(
-                step_id="bluetooth_confirm",
-                data_schema=SCHEMA_BLUETOOTH,
-                errors=errors,
+                step_id="user",
+                data_schema=vol.Schema({}),
+                errors={"base": "no_devices_found"},
             )
 
-        await self.async_set_unique_id(mac_address)
-        self._abort_if_unique_id_configured()
+        return self.async_show_form(
+            step_id="user",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_ADDRESS): SelectSelector(
+                        SelectSelectorConfig(
+                            options=_device_options(self._discovered),
+                            mode=SelectSelectorMode.DROPDOWN,
+                            sort=True,
+                        )
+                    ),
+                    vol.Required(CONF_NAME): str,
+                    vol.Required(CONF_PIN): str,
+                }
+            ),
+            errors=errors,
+        )
 
-        return self.async_create_entry(
-            title=self._discovery_info.name or f"MA Touch {mac_address}",
-            data={"pin": pin},
+    async def async_step_reconfigure(self, user_input: dict[str, Any] | None = None) -> SubentryFlowResult:
+        """Edit a thermostat's name / PIN."""
+
+        entry = self._get_entry()
+        subentry = self._get_reconfigure_subentry()
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            pin = user_input[CONF_PIN]
+            if not _valid_pin(pin):
+                errors[CONF_PIN] = "invalid_pin"
+            else:
+                return self.async_update_and_abort(
+                    entry,
+                    subentry,
+                    title=user_input[CONF_NAME],
+                    data_updates={CONF_NAME: user_input[CONF_NAME], CONF_PIN: pin},
+                )
+
+        return self.async_show_form(
+            step_id="reconfigure",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_NAME, default=subentry.data.get(CONF_NAME, "")): str,
+                    vol.Required(CONF_PIN, default=subentry.data.get(CONF_PIN, "")): str,
+                }
+            ),
+            errors=errors,
         )
 
 
-def validate_mac(mac: str) -> bool:
-    """Return whether or not given value is a valid MAC address."""
+class MAOptionsFlow(OptionsFlow):
+    """Options flow for Mitsubishi MA Touch (applies to all thermostats)."""
 
-    return bool(
-        mac
-        and len(mac) == 17
-        and mac.count(":") == 5
-        and all(int(part, 16) < 256 for part in mac.split(":") if part)
-    )
+    async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """Manage the integration options."""
 
-def validate_pin(pin: str) -> bool:
-    """Return whether or not given value is a valid PIN."""
+        if user_input is not None:
+            return self.async_create_entry(data=user_input)
 
-    return pin.isdigit() and len(pin) == 4
+        opts = self.config_entry.options
+        return self.async_show_form(
+            step_id="init",
+            data_schema=vol.Schema(
+                {
+                    vol.Optional(
+                        "scan_interval", default=opts.get("scan_interval", DEFAULT_SCAN_INTERVAL)
+                    ): vol.All(vol.Coerce(int), vol.Range(min=5, max=3600)),
+                    vol.Optional("log_polls", default=opts.get("log_polls", False)): bool,
+                    vol.Optional(
+                        "capture_raw_frames", default=opts.get("capture_raw_frames", False)
+                    ): bool,
+                }
+            ),
+        )
