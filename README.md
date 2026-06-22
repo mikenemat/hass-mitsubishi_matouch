@@ -30,12 +30,10 @@ It focuses on doing a few things well:
   Assistant card matches the physical controller exactly (no off-by-one).
 
 <p align="center">
-  <img src="images/thermostat-card.png" alt="Home Assistant thermostat card for a Casita Living Area MA Touch unit" width="350">
-  &nbsp;&nbsp;
-  <img src="images/diagnostics.png" alt="Per-thermostat diagnostic sensors: connection uptime, active proxy, signal strength, poll latency, reconnects, disconnects" width="368">
+  <img src="images/thermostat-card.png" alt="Home Assistant thermostat card for a Living Area MA Touch unit, shown in Fahrenheit" width="330">
 </p>
 
-<p align="center"><sub>The Home Assistant thermostat card and per-device diagnostic telemetry for one unit.</sub></p>
+<p align="center"><sub>The Home Assistant thermostat card for one MA Touch unit — whole-°F setpoints that match the physical controller.</sub></p>
 
 ## Why Bluetooth?
 
@@ -262,6 +260,12 @@ Per thermostat, for characterizing the BLE/proxy link over time
 | Poll latency | ms | Round-trip time of the last status read |
 | Active proxy | — | Which ESP32 proxy is currently serving this thermostat |
 | Signal strength | dBm | Link RSSI (captured at connect) |
+
+<p align="center">
+  <img src="images/diagnostics.png" alt="Per-thermostat diagnostic telemetry on the Home Assistant device page: connection uptime, active proxy, signal strength, poll latency, reconnects, disconnects" width="420">
+</p>
+
+<p align="center"><sub>Per-thermostat diagnostic telemetry on the device page (illustrative).</sub></p>
 
 ## Temperature & Fahrenheit
 
