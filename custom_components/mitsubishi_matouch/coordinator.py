@@ -10,6 +10,7 @@ from dataclasses import replace
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.components import bluetooth
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed, ConfigEntryAuthFailed
+from homeassistant.exceptions import HomeAssistantError
 
 from bleak.backends.device import BLEDevice
 
@@ -412,56 +413,72 @@ class MACoordinator(DataUpdateCoordinator):
         self._target_fan_mode = None
         self._target_vane_mode = None
 
-    def _raise_if_control_request_failed(self) -> None:
-        """Raise control request failures from the latest refresh for service handling."""
+    def _raise_command_error(self) -> None:
+        """Raise a clear error after a control attempt that did NOT apply, so the
+        user is told it didn't take (rather than the card silently showing the new
+        value as if it stuck)."""
 
-        last_exception = self.last_exception
-        if last_exception is None:
-            return
+        exc = self.last_exception
+        root = (exc.__cause__ or exc) if exc is not None else None
+        if isinstance(root, MAControlRequestFailedException):
+            # The device received the command and rejected it (e.g. it's in menus).
+            raise root
+        # The command could not be delivered at all (link down / timeout / bad PIN /
+        # not currently reachable through any proxy).
+        raise HomeAssistantError(
+            f"Couldn't reach {self.device_name} to apply the change — it was not changed."
+        )
 
-        root_exception = last_exception.__cause__ or last_exception
-        if isinstance(root_exception, MAControlRequestFailedException):
-            raise root_exception
+    async def _async_apply_command(self, **optimistic) -> None:
+        """Send a queued control change and confirm it actually applied.
+
+        The caller has already set the pending target(s). We reflect the change
+        optimistically for instant card feedback, then run an AWAITED refresh
+        (async_refresh, NOT the debounced async_request_refresh) so the command's
+        own poll has completed by the time we check the result — that's what lets us
+        reliably tell the user whether it applied. On failure we revert the
+        optimistic value (so the card never shows an un-applied change as done) and
+        raise so Home Assistant surfaces the failure.
+        """
+
+        previous = self.data
+        self._apply_optimistic_update(**optimistic)
+        await self.async_refresh()
+        if not self.last_update_success:
+            if previous is not None:
+                self.data = previous
+                self.async_update_listeners()
+            self._raise_command_error()
 
     async def async_set_heat_setpoint(self, temperature: float) -> None:
         """Sets the heat setpoint."""
 
         self._target_heat_setpoint = temperature
-        self._apply_optimistic_update(heat_setpoint=temperature)
-        await self.async_request_refresh()
-        self._raise_if_control_request_failed()
+        await self._async_apply_command(heat_setpoint=temperature)
 
     async def async_set_cool_setpoint(self, temperature: float) -> None:
         """Sets the cool setpoint."""
 
         self._target_cool_setpoint = temperature
-        self._apply_optimistic_update(cool_setpoint=temperature)
-        await self.async_request_refresh()
-        self._raise_if_control_request_failed()
+        await self._async_apply_command(cool_setpoint=temperature)
 
     async def async_set_operation_mode(self, operation_mode: MAOperationMode) -> None:
         """Sets the operation mode."""
 
         self._target_operation_mode = operation_mode
-        self._apply_optimistic_update(operation_mode=operation_mode)
-        await self.async_request_refresh()
-        self._raise_if_control_request_failed()
+        await self._async_apply_command(operation_mode=operation_mode)
 
     async def async_set_fan_mode(self, fan_mode: MAFanMode) -> None:
         """Sets the fan mode."""
 
         self._target_fan_mode = fan_mode
-        self._apply_optimistic_update(fan_mode=fan_mode)
-        await self.async_request_refresh()
-        self._raise_if_control_request_failed()
+        await self._async_apply_command(fan_mode=fan_mode)
 
     async def async_set_vane_mode(self, vane_mode: MAVaneMode) -> None:
         """Sets the vane mode."""
 
         self._target_vane_mode = vane_mode
-        self._apply_optimistic_update(vane_mode=vane_mode)
-        await self.async_request_refresh()
-        self._raise_if_control_request_failed()
+        await self._async_apply_command(vane_mode=vane_mode)
 
     async def async_close_connection(self) -> None:
         """Disconnect the persistent BLE connection (called on unload)."""

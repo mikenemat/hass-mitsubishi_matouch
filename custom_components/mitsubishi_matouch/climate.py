@@ -131,16 +131,19 @@ class MAClimate(CoordinatorEntity[MACoordinator], ClimateEntity):
 
     @property
     def available(self) -> bool:
-        """Tolerate a few transient poll failures before flipping unavailable.
+        """Go unavailable promptly on a real outage, but tolerate ONE transient
+        blip so a single adv gap / rebalance hop doesn't flicker the card.
 
-        A single adv gap / connect timeout during a proxy handoff shouldn't grey
-        the card; a genuine outage still goes unavailable promptly (after the
-        coordinator's consecutive-failure grace).
+        With one failure tolerated, a genuine outage greys the card after the second
+        consecutive failed poll (~15-30 s incl. backoff). Combined with commands that
+        raise when they can't be delivered, the user can trust that a live-looking
+        card is actually controllable and that any change they make either applies
+        or reports an error.
         """
 
         if self.coordinator.last_update_success:
             return True
-        return self.coordinator.consecutive_failures < 3
+        return self.coordinator.consecutive_failures < 2
 
     # --- unit handling -------------------------------------------------------
     # The device is Celsius-native (0.5°C). When HA's unit system is Fahrenheit we

@@ -320,6 +320,14 @@ This integration is built to be left running 24/7 across flaky radios:
   can't cause a bounce storm).
 - **HA restart / integration reload** → connections are re-established and
   rebalanced; adding or removing one thermostat never disturbs the others.
+- **The card tells the truth about reachability** → a thermostat's card goes
+  **unavailable** within ~15–30 s of a genuine outage (one transient blip is
+  tolerated so a rebalance hop doesn't flicker it), so a live-looking card is
+  actually controllable.
+- **Changes are confirmed, not fire-and-forget** → a setpoint/mode/fan/swing change
+  is sent and verified on the spot. If it can't be delivered (unit unreachable), the
+  card **reverts to the real value** and Home Assistant raises a visible error —
+  you're never left thinking a change applied when it didn't.
 
 ## Troubleshooting
 
