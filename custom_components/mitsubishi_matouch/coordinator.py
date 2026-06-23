@@ -10,6 +10,7 @@ from dataclasses import replace
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.components import bluetooth
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed, ConfigEntryAuthFailed
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.exceptions import HomeAssistantError
 
 from bleak.backends.device import BLEDevice
@@ -21,7 +22,7 @@ from .btmatouch.exceptions import MAException, MAAuthException, MAControlRequest
 from .models import MAConfigEntry
 from .proxy_balancer import MAProxyBalancer
 from .telemetry import MATelemetryLog
-from .const import MAX_BACKOFF_INTERVAL
+from .const import DOMAIN, MAX_BACKOFF_INTERVAL
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -64,6 +65,10 @@ class MACoordinator(DataUpdateCoordinator):
         # Set by async_rebalance(); honored at the top of the next (serialized)
         # poll so the re-pick happens under the coordinator's refresh lock.
         self._force_repick = False
+        # Repairs issue for a rejected PIN: raised on an auth failure, cleared on
+        # the next successful poll or when the thermostat is removed.
+        self._issue_id = f"invalid_pin_{address}"
+        self._auth_issue_active = False
         self._prev_connect_count = 0
         self._prev_disconnect_count = 0
         self._prev_status_hex: str | None = None
@@ -200,6 +205,33 @@ class MACoordinator(DataUpdateCoordinator):
                 self.update_interval = timedelta(seconds=scan_interval)
 
     @callback
+    def _raise_auth_issue(self) -> None:
+        """Surface a Repairs issue telling the user this thermostat's PIN is wrong
+        and needs reconfiguring. Idempotent (skips if already raised)."""
+
+        if self._auth_issue_active:
+            return
+        ir.async_create_issue(
+            self.hass,
+            DOMAIN,
+            self._issue_id,
+            is_fixable=False,
+            severity=ir.IssueSeverity.ERROR,
+            translation_key="invalid_pin",
+            translation_placeholders={"name": self.device_name},
+        )
+        self._auth_issue_active = True
+
+    @callback
+    def clear_auth_issue(self) -> None:
+        """Remove the invalid-PIN Repairs issue (on a successful poll or on removal).
+        Safe to call when none exists (no-op), so it also clears a stale issue left
+        by a previous coordinator instance across a reload."""
+
+        ir.async_delete_issue(self.hass, DOMAIN, self._issue_id)
+        self._auth_issue_active = False
+
+    @callback
     def _note_connection_source(self) -> None:
         """Record the proxy actually serving the live link (advertisement-based
         lookups can't see a connected device) for accurate telemetry + balancing."""
@@ -333,6 +365,7 @@ class MACoordinator(DataUpdateCoordinator):
             self.last_poll_duration = time.monotonic() - started
             result = self._apply_pending_targets_to_status(status)
             self._reset_backoff()
+            self.clear_auth_issue()
             await self._record_poll(
                 True,
                 room_temperature=status.room_temperature,
@@ -340,13 +373,14 @@ class MACoordinator(DataUpdateCoordinator):
             )
             return result
         except MAAuthException as ex:
-            # Wrong PIN: keep this thermostat unavailable with a clear error. In
-            # the subentry model there is no per-device reauth flow; the user
-            # fixes the PIN via the thermostat's "reconfigure" action. Back off so
-            # we don't churn reconnect+login attempts against a bad PIN every tick.
+            # Wrong PIN: raise a Repairs issue naming this thermostat so the user
+            # knows to reconfigure its PIN (there's no per-subentry reauth flow in
+            # the subentry model). Back off so we don't churn reconnect+login
+            # attempts against a bad PIN every tick.
             await self._thermostat.async_close()
             self._clear_active_proxy()
             self._clear_pending_targets()
+            self._raise_auth_issue()
             await self._record_poll(False, error="auth", detail=str(ex))
             self._apply_backoff()
             raise UpdateFailed(f"Authentication failed (check PIN): {ex}") from ex

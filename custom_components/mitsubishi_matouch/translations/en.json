@@ -78,6 +78,12 @@
       }
     }
   },
+  "issues": {
+    "invalid_pin": {
+      "title": "{name}: incorrect PIN",
+      "description": "Home Assistant couldn't authenticate to **{name}** — its PIN was rejected, so the thermostat can't be controlled.\n\nTo fix it, open **Settings → Devices & Services → Mitsubishi MA Touch**, find **{name}**, and choose **Reconfigure** to enter the correct PIN. The PIN is on the thermostat under **Settings → Bluetooth** (enable Bluetooth in the admin settings first; default code 0000).\n\nThis alert clears automatically once the correct PIN connects."
+    }
+  },
   "entity": {
     "climate": {
       "matouch": {

@@ -210,6 +210,7 @@ async def _stop_subentry(hass: HomeAssistant, entry: MAConfigEntry, subentry_id:
     entry.runtime_data.subentry_data.pop(subentry_id, None)
     coordinator = entry.runtime_data.coordinators.pop(subentry_id, None)
     if coordinator is not None:
+        coordinator.clear_auth_issue()
         await coordinator.async_shutdown()
         await coordinator.async_close_connection()
 

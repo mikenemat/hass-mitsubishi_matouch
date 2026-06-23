@@ -335,9 +335,12 @@ This integration is built to be left running 24/7 across flaky radios:
   proxy/adapter. Confirm it's powered, that an ESP32 proxy is online and in range,
   and that the proxy is in **active** mode. The search auto-retries; you can also
   click **Search again**.
-- **Authentication fails / thermostat stays unavailable** → wrong PIN. Use the
-  thermostat's **Reconfigure** action to correct it (the PIN is on the controller
-  under **Settings → Bluetooth** — see [Before you start](#before-you-start)).
+- **Authentication fails / thermostat stays unavailable** → wrong PIN. The
+  integration raises a **Repairs** issue (*"&lt;name&gt;: incorrect PIN"*) naming the
+  unit; use that thermostat's **Reconfigure** action to enter the right PIN (it's on
+  the controller under **Settings → Bluetooth** — see
+  [Before you start](#before-you-start)). The alert clears itself once the correct
+  PIN connects.
 - **Card shows half-degrees or is 1 °F off** → you're on an older build; update to
   the current release, which presents native °F via Mitsubishi's table.
 - **An `E2` flashes on the controller** → that's a **controller-local** indicator
