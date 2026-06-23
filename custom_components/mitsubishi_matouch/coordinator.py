@@ -30,6 +30,9 @@ _LOGGER = logging.getLogger(__name__)
 _CONNECT_TIMEOUT = 25
 # Minimum seconds between persisting repeated identical poll failures to the file.
 _FAILURE_LOG_INTERVAL = 60
+# Consecutive DEVICE-CONFIRMED bad-PIN responses required before raising the Repairs
+# issue, so a single fluke can't flag a correctly-PINned unit as mis-configured.
+_AUTH_FAIL_THRESHOLD = 2
 
 
 class MACoordinator(DataUpdateCoordinator):
@@ -69,6 +72,7 @@ class MACoordinator(DataUpdateCoordinator):
         # the next successful poll or when the thermostat is removed.
         self._issue_id = f"invalid_pin_{address}"
         self._auth_issue_active = False
+        self._auth_fail_streak = 0
         self._prev_connect_count = 0
         self._prev_disconnect_count = 0
         self._prev_status_hex: str | None = None
@@ -230,6 +234,7 @@ class MACoordinator(DataUpdateCoordinator):
 
         ir.async_delete_issue(self.hass, DOMAIN, self._issue_id)
         self._auth_issue_active = False
+        self._auth_fail_streak = 0
 
     @callback
     def _note_connection_source(self) -> None:
@@ -380,7 +385,13 @@ class MACoordinator(DataUpdateCoordinator):
             await self._thermostat.async_close()
             self._clear_active_proxy()
             self._clear_pending_targets()
-            self._raise_auth_issue()
+            # Flag a bad PIN only after repeated DEVICE-CONFIRMED rejections (the
+            # device returned a parsed bad-PIN result code, not a connectivity
+            # failure — those raise other exceptions handled below). A single fluke
+            # won't raise the Repairs issue.
+            self._auth_fail_streak += 1
+            if self._auth_fail_streak >= _AUTH_FAIL_THRESHOLD:
+                self._raise_auth_issue()
             await self._record_poll(False, error="auth", detail=str(ex))
             self._apply_backoff()
             raise UpdateFailed(f"Authentication failed (check PIN): {ex}") from ex
