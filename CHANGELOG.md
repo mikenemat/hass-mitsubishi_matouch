@@ -4,6 +4,29 @@ This is a hardened fork of [cyaneous/hass-mitsubishi_matouch](https://github.com
 focused on running several MA Touch (PAR-CT01MAU) thermostats reliably over ESP32
 Bluetooth proxies, 24/7.
 
+## 0.13.9
+
+- **Response checksum validation.** Every reply now has its trailing checksum
+  verified (`sum(all bytes before the 2-byte checksum)` as a 16-bit little-endian
+  value — confirmed against raw frames captured live from all five units). A
+  mismatch is treated as a corrupt frame and retried, instead of being trusted.
+  This eliminates rare **spurious "incorrect PIN"** events (a reply corrupted in
+  transit whose result byte happened to read `0x02` was being misread as a wrong
+  PIN) and guards against silently-corrupted temperature/mode data. Wire spec is
+  regression-locked in `tests/test_checksum.py`.
+
+## 0.13.4 – 0.13.8
+
+- **Command confirmation.** Setpoint/mode/fan changes apply optimistically, then
+  re-read; if the device rejects or the link drops, the entity reverts to actual
+  state and surfaces a clear error — so the card never shows a change that didn't
+  take.
+- **Availability grace.** A single failed poll no longer flips the card to
+  "unavailable"; it takes a short streak, which rides out one-off BLE hiccups.
+- **Invalid-PIN repair.** A genuinely wrong PIN now raises a Home Assistant
+  *Repairs* issue pointing at Reconfigure, and only after **3 consecutive** real
+  rejections — connectivity blips can't false-trigger it.
+
 ## 0.13.3
 
 - **Fahrenheit fix (upstream issue #4).** The device is Celsius-native (0.5°C steps)

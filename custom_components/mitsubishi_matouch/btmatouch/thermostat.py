@@ -802,10 +802,27 @@ class Thermostat:
             if len(self._receive_buffer) > self._receive_length:
                 raise MAResponseException("Frame overflow")
 
+            frame_len = self._receive_length
             self._receive_length = 0
-            response_id = self._receive_buffer[0] if self._receive_buffer else None
-            payload = self._receive_buffer[1:-2]
+            buffer = self._receive_buffer
             self._receive_buffer = bytes(0)
+
+            # Validate the trailing checksum so a corrupted reply isn't trusted. The
+            # controller sends sum(all bytes before the 2-byte checksum) as a 16-bit
+            # little-endian value (verified live across CT01MAU + CT01MA frames). The
+            # 2 length-header bytes aren't kept in the buffer, so fold them back in
+            # from frame_len. A mismatch = corruption in transit (e.g. a byte landing
+            # on 0x02 that would otherwise be misread as a wrong PIN); treat it as a
+            # retryable comms error rather than acting on bad data.
+            if len(buffer) < 3:
+                raise MAResponseException(f"Runt assembled frame ({len(buffer)} bytes)")
+            crc_received = int.from_bytes(buffer[-2:], "little")
+            crc_calc = (sum(frame_len.to_bytes(2, "little")) + sum(buffer[:-2])) & 0xFFFF
+            if crc_received != crc_calc:
+                raise MAResponseException(f"Bad checksum (got {crc_received}, want {crc_calc})")
+
+            response_id = buffer[0]
+            payload = buffer[1:-2]
 
             # The controller does NOT echo our request id unchanged: it replies with
             # request_id | 0x08 (it sets bit 3), confirmed across all message types.
@@ -821,8 +838,6 @@ class Thermostat:
                     "[%s] Unexpected response id %s (expected %s)",
                     self._mac_address, response_id, self._expected_response_id | 0x08,
                 )
-
-            # TODO: validate the trailing checksum
 
             if self._response_future is not None and not self._response_future.done():
                 self._response_future.set_result(payload)
