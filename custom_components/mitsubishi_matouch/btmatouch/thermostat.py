@@ -807,17 +807,19 @@ class Thermostat:
             payload = self._receive_buffer[1:-2]
             self._receive_buffer = bytes(0)
 
-            # R-5 telemetry: does the device echo our request message_id? Logging it
-            # (non-breaking - we still resolve) gathers the data to later add safe
-            # request/response correlation without risking breaking all comms.
+            # The controller does NOT echo our request id unchanged: it replies with
+            # request_id | 0x08 (it sets bit 3), confirmed across all message types.
+            # So a frame whose id != expected|0x08 is stale/out-of-order. Debug-only:
+            # the single pending-response future below is what resolves the request,
+            # so a mismatch here is informational, not an error (no per-poll spam).
             if (
                 response_id is not None
                 and self._expected_response_id is not None
-                and response_id != self._expected_response_id
+                and response_id != (self._expected_response_id | 0x08)
             ):
-                _LOGGER.warning(
-                    "[%s] Response id %s != expected %s",
-                    self._mac_address, response_id, self._expected_response_id,
+                _LOGGER.debug(
+                    "[%s] Unexpected response id %s (expected %s)",
+                    self._mac_address, response_id, self._expected_response_id | 0x08,
                 )
 
             # TODO: validate the trailing checksum
