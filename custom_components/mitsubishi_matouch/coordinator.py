@@ -30,9 +30,12 @@ _LOGGER = logging.getLogger(__name__)
 _CONNECT_TIMEOUT = 25
 # Minimum seconds between persisting repeated identical poll failures to the file.
 _FAILURE_LOG_INTERVAL = 60
-# Consecutive DEVICE-CONFIRMED bad-PIN responses required before raising the Repairs
-# issue, so a single fluke can't flag a correctly-PINned unit as mis-configured.
-_AUTH_FAIL_THRESHOLD = 2
+# Consecutive bad-PIN responses required before raising the Repairs issue. The
+# controller is observed to return a spurious one-off BAD_PIN with the CORRECT PIN
+# (the inbound response checksum isn't validated yet, so a corrupted reply whose
+# result byte reads 0x02 is misread as a wrong PIN). Require several in a row, reset
+# on any success — a real wrong PIN still flags in ~3 polls; isolated flukes never do.
+_AUTH_FAIL_THRESHOLD = 3
 
 
 class MACoordinator(DataUpdateCoordinator):
