@@ -131,18 +131,25 @@ class MAClimate(CoordinatorEntity[MACoordinator], ClimateEntity):
 
     @property
     def available(self) -> bool:
-        """Go unavailable promptly on a real outage, but tolerate ONE transient
-        blip so a single adv gap / rebalance hop doesn't flicker the card.
+        """Go unavailable promptly on a real outage, but tolerate ONE transient blip
+        so a single adv gap / rebalance hop doesn't flicker the card.
 
-        With one failure tolerated, a genuine outage greys the card after the second
-        consecutive failed poll (~15-30 s incl. backoff). Combined with commands that
-        raise when they can't be delivered, the user can trust that a live-looking
-        card is actually controllable and that any change they make either applies
-        or reports an error.
+        Two independent grey-out triggers so a hung in-flight poll can't hide an
+        outage (the bug behind units staying 'online' through a full proxy loss):
+          - consecutive-failure streak ≥ 2 — fast for units that fail cleanly; but a
+            wedged poll never records a result, so it can freeze this counter; and
+          - `is_stale` — a wall-clock check (no successful poll in several cadences)
+            that a frozen counter can't defeat. The per-poll timeout guarantees a
+            wedged poll eventually fails and re-fires this evaluation.
+
+        Combined with commands that raise when they can't be delivered, the user can
+        trust that a live-looking card is actually controllable.
         """
 
         if self.coordinator.last_update_success:
             return True
+        if self.coordinator.is_stale:
+            return False
         return self.coordinator.consecutive_failures < 2
 
     # --- unit handling -------------------------------------------------------

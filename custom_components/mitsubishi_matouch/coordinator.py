@@ -26,8 +26,16 @@ from .const import DOMAIN, MAX_BACKOFF_INTERVAL
 
 _LOGGER = logging.getLogger(__name__)
 
-# Upper bound on a single (re)connect+login so a marginal link can't stall polling.
-_CONNECT_TIMEOUT = 25
+# Hard ceiling on ONE full poll — connect + login + queued control writes + status
+# read — wrapping the WHOLE poll, not just the connect. A stale-but-"connected" link
+# (proxy yanked, TCP not yet detected dead) can otherwise hang the status read / GATT
+# lock with no deadline, which freezes the failure counter and leaves the unit looking
+# online indefinitely. On expiry the poll fails and the link is dropped to reconnect.
+_POLL_TIMEOUT = 30
+# Wall-clock backstop: grey the card if no poll has SUCCEEDED in this long (scaled to
+# the poll cadence). Unlike the consecutive-failure counter, a hung poll can't freeze
+# the clock — this is what guarantees a unit can't stay "online" through an outage.
+_STALE_FLOOR = 45
 # Minimum seconds between persisting repeated identical poll failures to the file.
 _FAILURE_LOG_INTERVAL = 60
 # Consecutive bad-PIN responses required before raising the Repairs issue. The
@@ -68,6 +76,9 @@ class MACoordinator(DataUpdateCoordinator):
         # a saturated proxy is not hammered every interval during an outage).
         self._base_interval = scan_interval
         self._fail_streak = 0
+        # Monotonic time of the last SUCCESSFUL poll, for the staleness backstop
+        # (None until the first success).
+        self._last_success_monotonic: float | None = None
         # Set by async_rebalance(); honored at the top of the next (serialized)
         # poll so the re-pick happens under the coordinator's refresh lock.
         self._force_repick = False
@@ -149,6 +160,20 @@ class MACoordinator(DataUpdateCoordinator):
         """Number of back-to-back failed polls (0 once a poll succeeds)."""
 
         return self._fail_streak
+
+    @property
+    def is_stale(self) -> bool:
+        """True if no poll has SUCCEEDED for several cadences — a wall-clock outage
+        backstop. The consecutive-failure counter can be frozen by a hung in-flight
+        poll (which never records a result); the clock cannot, so this is what
+        guarantees a unit greys out even if its poll is wedged. Scales with the poll
+        interval so a long cadence doesn't false-trip between polls.
+        """
+
+        if self._last_success_monotonic is None:
+            return True
+        threshold = max(self._base_interval * 4, _STALE_FLOOR)
+        return (time.monotonic() - self._last_success_monotonic) > threshold
 
     @callback
     def _clear_active_proxy(self) -> None:
@@ -279,6 +304,62 @@ class MACoordinator(DataUpdateCoordinator):
         coordinator.async_config_entry_first_refresh.
         """
 
+    async def _run_poll(self) -> Status:
+        """One full poll: (re)connect, flush any queued control writes, read status.
+
+        Runs under the caller's _POLL_TIMEOUT so a hung step — e.g. a status read on a
+        stale-but-"connected" link after its proxy is yanked, or a GATT-lock wait
+        behind a wedged keepalive — can't block the poll indefinitely and freeze the
+        failure counter (which is what left units looking online through a full outage).
+        """
+
+        await self._thermostat.async_ensure_connected()
+        self._note_connection_source()
+
+        # Process pending control updates over the live connection. Clear a queued
+        # value only after a successful write so failures can retry.
+        if (heat_setpoint := self._target_heat_setpoint) is not None:
+            try:
+                await self._thermostat.async_set_heat_setpoint(heat_setpoint)
+                self._target_heat_setpoint = None
+            except MAControlRequestFailedException:
+                self._target_heat_setpoint = None
+                raise
+
+        if (cool_setpoint := self._target_cool_setpoint) is not None:
+            try:
+                await self._thermostat.async_set_cool_setpoint(cool_setpoint)
+                self._target_cool_setpoint = None
+            except MAControlRequestFailedException:
+                self._target_cool_setpoint = None
+                raise
+
+        if (operation_mode := self._target_operation_mode) is not None:
+            try:
+                await self._thermostat.async_set_operation_mode(operation_mode)
+                self._target_operation_mode = None
+            except MAControlRequestFailedException:
+                self._target_operation_mode = None
+                raise
+
+        if (fan_mode := self._target_fan_mode) is not None:
+            try:
+                await self._thermostat.async_set_fan_mode(fan_mode)
+                self._target_fan_mode = None
+            except MAControlRequestFailedException:
+                self._target_fan_mode = None
+                raise
+
+        if (vane_mode := self._target_vane_mode) is not None:
+            try:
+                await self._thermostat.async_set_vane_mode(vane_mode)
+                self._target_vane_mode = None
+            except MAControlRequestFailedException:
+                self._target_vane_mode = None
+                raise
+
+        return await self._thermostat.async_get_status()
+
     async def _async_update_data(self) -> Status:
         """Fetch the latest status over a persistent BLE connection.
 
@@ -323,53 +404,8 @@ class MACoordinator(DataUpdateCoordinator):
 
         started = time.monotonic()
         try:
-            async with asyncio.timeout(_CONNECT_TIMEOUT):
-                await self._thermostat.async_ensure_connected()
-            self._note_connection_source()
-
-            # Process pending control updates over the live connection. Clear a
-            # queued value only after a successful write so failures can retry.
-            if (heat_setpoint := self._target_heat_setpoint) is not None:
-                try:
-                    await self._thermostat.async_set_heat_setpoint(heat_setpoint)
-                    self._target_heat_setpoint = None
-                except MAControlRequestFailedException:
-                    self._target_heat_setpoint = None
-                    raise
-
-            if (cool_setpoint := self._target_cool_setpoint) is not None:
-                try:
-                    await self._thermostat.async_set_cool_setpoint(cool_setpoint)
-                    self._target_cool_setpoint = None
-                except MAControlRequestFailedException:
-                    self._target_cool_setpoint = None
-                    raise
-
-            if (operation_mode := self._target_operation_mode) is not None:
-                try:
-                    await self._thermostat.async_set_operation_mode(operation_mode)
-                    self._target_operation_mode = None
-                except MAControlRequestFailedException:
-                    self._target_operation_mode = None
-                    raise
-
-            if (fan_mode := self._target_fan_mode) is not None:
-                try:
-                    await self._thermostat.async_set_fan_mode(fan_mode)
-                    self._target_fan_mode = None
-                except MAControlRequestFailedException:
-                    self._target_fan_mode = None
-                    raise
-
-            if (vane_mode := self._target_vane_mode) is not None:
-                try:
-                    await self._thermostat.async_set_vane_mode(vane_mode)
-                    self._target_vane_mode = None
-                except MAControlRequestFailedException:
-                    self._target_vane_mode = None
-                    raise
-
-            status = await self._thermostat.async_get_status()
+            async with asyncio.timeout(_POLL_TIMEOUT):
+                status = await self._run_poll()
             self.last_poll_duration = time.monotonic() - started
             result = self._apply_pending_targets_to_status(status)
             self._reset_backoff()
@@ -404,13 +440,17 @@ class MACoordinator(DataUpdateCoordinator):
             await self._record_poll(False, error="control", detail=str(ex))
             raise UpdateFailed(f"Control request failed: {ex}") from ex
         except TimeoutError as ex:
-            # connect+login exceeded _CONNECT_TIMEOUT - drop and retry (backed off).
+            # The whole poll exceeded _POLL_TIMEOUT — a hung connect/login/control/
+            # status read (e.g. a stale link after a yanked proxy, or a wedged GATT
+            # lock). Drop the link so the next poll reconnects cleanly, and back off.
+            # Fix #3: this is what stops trusting a stale is_connected — a hung poll
+            # on a "connected" link now times out and forces a fresh reconnect.
             await self._thermostat.async_close()
             self._clear_active_proxy()
             self._clear_pending_targets()
-            await self._record_poll(False, error="connect_timeout", detail=str(ex))
+            await self._record_poll(False, error="poll_timeout", detail=str(ex))
             self._apply_backoff()
-            raise UpdateFailed(f"Connection timed out: {ex}") from ex
+            raise UpdateFailed(f"Poll timed out: {ex}") from ex
         except MAException as ex:
             # Any other protocol/link error: drop the connection so the next
             # poll reconnects cleanly, and back off the cadence during an outage.
@@ -578,6 +618,7 @@ class MACoordinator(DataUpdateCoordinator):
         # transition, then at most once per _FAILURE_LOG_INTERVAL) so a flapping
         # unit can't self-erase the file over a multi-hour storm.
         if success:
+            self._last_success_monotonic = time.monotonic()
             self._last_fail_persist = None
             self._last_fail_error = None
             persist = self._log_polls

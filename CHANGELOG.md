@@ -4,6 +4,22 @@ This is a hardened fork of [cyaneous/hass-mitsubishi_matouch](https://github.com
 focused on running several MA Touch (PAR-CT01MAU) thermostats reliably over ESP32
 Bluetooth proxies, 24/7.
 
+## 0.14.4
+
+- **Fix: a unit could stay "online" through a proxy outage (and was slow to grey
+  otherwise).** The per-poll timeout covered only the *connect* step, so a status read
+  on a stale-but-"connected" link (proxy yanked, TCP not yet detected dead) could hang
+  with no deadline — freezing the consecutive-failure counter so the card never went
+  unavailable, and any optimistic setpoint change persisted indefinitely. Now:
+  - the **entire** poll (connect + control writes + status read) runs under one
+    timeout, so a hung step fails the poll and drops the link to reconnect;
+  - availability has a **wall-clock staleness backstop** (no successful poll in several
+    cadences ⇒ unavailable) that a frozen counter can't defeat;
+  - a timed-out poll drops the stale link instead of trusting `is_connected`.
+
+  A real outage is now detected in tens of seconds instead of minutes-or-never;
+  recovery when the proxy returns is unchanged (fast).
+
 ## 0.14.3
 
 - **Fix reload leaving every unit unavailable.** Setup blocked on a sequential
