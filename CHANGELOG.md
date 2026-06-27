@@ -4,6 +4,16 @@ This is a hardened fork of [cyaneous/hass-mitsubishi_matouch](https://github.com
 focused on running several MA Touch (PAR-CT01MAU) thermostats reliably over ESP32
 Bluetooth proxies, 24/7.
 
+## 0.14.1
+
+- **Fix migration duplicate-device (regression in 0.14.0).** When a pre-fork entry
+  was *promoted* in place to become the parent, its device kept a stray entry-level
+  link alongside the new subentry link, so it showed up twice — once under its
+  thermostat and once under "Devices that don't belong to a sub-entry." The promote
+  path now drops that stray link (matching Home Assistant's own
+  `openai_conversation` migration). Instances already migrated by 0.14.0 **self-heal**
+  on upgrade (a one-time pass removes the stray link — no re-pairing needed).
+
 ## 0.14.0
 
 - **Upgrade migration from the upstream (cyaneous) integration.** The original

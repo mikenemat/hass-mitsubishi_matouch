@@ -95,7 +95,8 @@ class MAConfigFlow(ConfigFlow, domain=DOMAIN):
     # cyaneous per-device entries and (b) early-fork parent entries created before any
     # version was declared — while keeping in-place DOWNGRADES allowed (HA only blocks
     # major-version downgrades with MIGRATION_ERROR). That keeps "revert via HACS" clean.
-    MINOR_VERSION = 2
+    # 3: heals the v0.14.0 promote bug (stray entry-level device link). 2: initial migration.
+    MINOR_VERSION = 3
 
     def __init__(self) -> None:
         """Initialize the config flow."""

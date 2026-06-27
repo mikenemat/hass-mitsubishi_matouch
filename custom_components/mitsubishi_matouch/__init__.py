@@ -166,6 +166,17 @@ def _adopt_existing_records(
             add_config_entry_id=parent.entry_id,
             add_config_subentry_id=subentry_id,
         )
+        # When a legacy entry is PROMOTED in place to become the parent, its device
+        # keeps the original entry-level {None} link, and add_config_subentry_id above
+        # UNIONS the subentry alongside it (HA doesn't replace) -> {None, subentry}.
+        # The stray {None} makes the device show under "Devices that don't belong to a
+        # sub-entry". Drop it (no-op for folded devices, which never had {None} under
+        # the parent). Mirrors homeassistant/components/openai_conversation migration.
+        device_registry.async_update_device(
+            device.id,
+            remove_config_entry_id=parent.entry_id,
+            remove_config_subentry_id=None,
+        )
 
     entity_id = entity_registry.async_get_entity_id("climate", DOMAIN, f"matouch_{format_mac(mac)}")
     if entity_id is not None:
@@ -173,6 +184,30 @@ def _adopt_existing_records(
         if device is not None:
             updates["device_id"] = device.id
         entity_registry.async_update_entity(entity_id, **updates)
+
+
+@callback
+def _heal_orphan_device_links(hass: HomeAssistant, parent: MAConfigEntry) -> None:
+    """Drop stray entry-level (no-subentry) device links under the parent left by the
+    v0.14.0 promote path (which unioned a subentry alongside the original {None} link).
+    Such a device shows up under "Devices that don't belong to a sub-entry". Only the
+    {None} is removed, and only when a real subentry link also exists, so a device is
+    never orphaned. No-op on a healthy entry; failures never block migration.
+    """
+
+    device_registry = dr.async_get(hass)
+    try:
+        for device in dr.async_entries_for_config_entry(device_registry, parent.entry_id):
+            subs = device.config_entries_subentries.get(parent.entry_id, set())
+            if None in subs and any(s is not None for s in subs):
+                device_registry.async_update_device(
+                    device.id,
+                    remove_config_entry_id=parent.entry_id,
+                    remove_config_subentry_id=None,
+                )
+                _LOGGER.info("Healed stray entry-level link on device %s", device.id)
+    except Exception as ex:  # noqa: BLE001 - healing must never block migration
+        _LOGGER.warning("Could not heal device links: %s", ex)
 
 
 def _ensure_subentry(
@@ -232,11 +267,13 @@ async def async_migrate_entry(hass: HomeAssistant, entry: MAConfigEntry) -> bool
     need a minor-version bump — they are already the right shape.
     """
 
-    # Already the parent shape (a current install or an early-fork parent): just
-    # ensure the minor version is current so this doesn't re-run every start.
+    # Already the parent shape (a current install or an early-fork parent). Heal any
+    # stray entry-level device links left by the v0.14.0 promote bug, then bring the
+    # minor version current so this doesn't re-run every start.
     if entry.unique_id == DOMAIN:
-        if entry.minor_version != 2:
-            hass.config_entries.async_update_entry(entry, minor_version=2)
+        _heal_orphan_device_links(hass, entry)
+        if entry.minor_version != 3:
+            hass.config_entries.async_update_entry(entry, minor_version=3)
         return True
 
     mac = _legacy_mac(entry)
@@ -260,7 +297,7 @@ async def async_migrate_entry(hass: HomeAssistant, entry: MAConfigEntry) -> bool
         if promoting:
             # Promote THIS entry in place to be the single parent.
             hass.config_entries.async_update_entry(
-                entry, unique_id=DOMAIN, title="Mitsubishi MA Touch", data={}, minor_version=2
+                entry, unique_id=DOMAIN, title="Mitsubishi MA Touch", data={}, minor_version=3
             )
             parent = entry
 
