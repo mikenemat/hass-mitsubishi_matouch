@@ -78,3 +78,10 @@ REBALANCE_STEP_DELAY = 6.0     # let a bounced device reconnect before re-evalua
 # Per-coordinator exponential backoff cap (seconds) on repeated connect/link
 # failures, so an unreachable unit / saturated proxy is not hammered every poll.
 MAX_BACKOFF_INTERVAL = 120
+
+# How often to re-evaluate a failing unit's availability. HA's DataUpdateCoordinator
+# only fires entity updates on a success or the FIRST failure of a streak, so a
+# time-based "stale" grey-out would otherwise never be re-checked during a sustained
+# outage (the card stays online showing stale data). A timer nudges listeners while a
+# unit is failing so it greys on schedule.
+AVAILABILITY_TICK_INTERVAL = 15

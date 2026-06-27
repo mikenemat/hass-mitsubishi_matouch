@@ -21,6 +21,7 @@ from homeassistant.helpers.typing import ConfigType
 import homeassistant.helpers.config_validation as cv
 
 from .const import (
+    AVAILABILITY_TICK_INTERVAL,
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
     REBALANCE_COOLDOWN,
@@ -385,6 +386,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: MAConfigEntry) -> bool:
     unsub_proxy = _register_proxy_events(hass, entry)
     if unsub_proxy is not None:
         entry.async_on_unload(unsub_proxy)
+
+    # Availability tick: HA's coordinator only fires entity updates on a success or
+    # the FIRST failure of a streak, so a card's time-based `is_stale` greying would
+    # otherwise never be re-evaluated during a sustained outage — it would sit
+    # "available" showing stale data (units that never grey). While a unit is failing,
+    # nudge its listeners so `available` is re-read and it greys on schedule. No-op
+    # when healthy, and only after the unit has had data (so we never push a
+    # never-connected unit through _handle_coordinator_update with no status).
+    async def _availability_tick(_now) -> None:
+        rt = entry.runtime_data
+        if rt is None:
+            return
+        for coordinator in rt.coordinators.values():
+            if coordinator.data is not None and not coordinator.last_update_success:
+                coordinator.async_update_listeners()
+
+    entry.async_on_unload(
+        async_track_time_interval(hass, _availability_tick, timedelta(seconds=AVAILABILITY_TICK_INTERVAL))
+    )
 
     return True
 

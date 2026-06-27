@@ -4,6 +4,18 @@ This is a hardened fork of [cyaneous/hass-mitsubishi_matouch](https://github.com
 focused on running several MA Touch (PAR-CT01MAU) thermostats reliably over ESP32
 Bluetooth proxies, 24/7.
 
+## 0.14.5
+
+- **Fix: units still wouldn't grey on a sustained outage (follow-up to 0.14.4).** The
+  bounded poll and the `is_stale` backstop were both working, but HA's
+  `DataUpdateCoordinator` only notifies entities on a *success* or the *first* failure
+  of a streak — so a card's availability was evaluated once at the start of the outage
+  (while `is_stale` was not yet true) and **never re-checked**, leaving it "online" with
+  stale data. (A unit only greyed if something else happened to nudge it — e.g. a
+  setpoint-change revert.) Added a periodic availability tick that re-evaluates a
+  *failing* unit every 15 s, so it greys within ~45–60 s of a real outage regardless of
+  HA's listener behavior. No-op when healthy.
+
 ## 0.14.4
 
 - **Fix: a unit could stay "online" through a proxy outage (and was slow to grey
