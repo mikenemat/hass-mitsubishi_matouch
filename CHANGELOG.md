@@ -4,6 +4,18 @@ This is a hardened fork of [cyaneous/hass-mitsubishi_matouch](https://github.com
 focused on running several MA Touch (PAR-CT01MAU) thermostats reliably over ESP32
 Bluetooth proxies, 24/7.
 
+## 0.14.0
+
+- **Upgrade migration from the upstream (cyaneous) integration.** The original
+  integration created one config entry per thermostat; this fork uses a single
+  parent entry with a subentry per thermostat. Upgrading in place previously left
+  the old pairings stranded and could create duplicate devices. A config-entry
+  migration (`VERSION` → 2) now **adopts existing pairings**: it folds each old
+  per-thermostat entry into the parent as a subentry and re-homes the existing
+  device + climate entity, so **entity IDs and history are preserved** (no
+  re-pairing, no duplicates). Early-fork parent entries are version-bumped in place
+  (no structural change). The new diagnostic sensors appear fresh (expected).
+
 ## 0.13.9
 
 - **Response checksum validation.** Every reply now has its trailing checksum

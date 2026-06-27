@@ -4,6 +4,7 @@ import asyncio
 import logging
 import time
 from datetime import timedelta
+from types import MappingProxyType
 
 import voluptuous as vol
 
@@ -12,7 +13,9 @@ from homeassistant.core import HomeAssistant, ServiceCall, ServiceResponse, Supp
 from homeassistant.const import CONF_ADDRESS, CONF_NAME, CONF_PIN, Platform
 from homeassistant.config_entries import ConfigSubentry
 from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.helpers.debounce import Debouncer
+from homeassistant.helpers.device_registry import CONNECTION_BLUETOOTH, format_mac
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.typing import ConfigType
@@ -119,6 +122,182 @@ async def _first_refresh(coordinator: MACoordinator, address: str) -> None:
         await coordinator.async_config_entry_first_refresh()
     except ConfigEntryNotReady:
         _LOGGER.warning("MA Touch '%s' not ready yet; it will retry", address)
+
+
+# HA runs async_migrate_entry once per stored entry, concurrently. This lock
+# serializes the "find-or-create the single parent" step so two legacy per-device
+# entries can't each elect a separate parent.
+_MIGRATION_LOCK = asyncio.Lock()
+
+
+def _legacy_mac(entry: MAConfigEntry) -> str | None:
+    """Extract a thermostat MAC from a pre-fork (per-device) config entry.
+
+    Upstream stored it as data['mac_address'] (user flow) or only in the entry's
+    unique_id (bluetooth flow). Returns a normalized MAC, or None if unrecognizable.
+    """
+
+    raw = entry.data.get("mac_address") or entry.unique_id
+    return format_mac(raw) if raw else None
+
+
+@callback
+def _adopt_existing_records(
+    hass: HomeAssistant, mac: str, parent: MAConfigEntry, subentry_id: str
+) -> None:
+    """Re-home the pre-existing device + climate entity for `mac` onto parent+subentry.
+
+    The bluetooth connection key {(bluetooth, mac)} and the climate unique_id
+    `matouch_<mac>` are byte-identical across upstream and this fork, so re-pointing
+    the existing registry rows preserves the device, the entity_id, and recorder
+    history instead of spawning duplicates. Missing rows are simply skipped — fresh
+    setup will create them (e.g. the new diagnostic sensors, which upstream lacked).
+    """
+
+    device_registry = dr.async_get(hass)
+    entity_registry = er.async_get(hass)
+
+    device = device_registry.async_get_device(
+        connections={(CONNECTION_BLUETOOTH, format_mac(mac))}
+    )
+    if device is not None:
+        device_registry.async_update_device(
+            device.id,
+            add_config_entry_id=parent.entry_id,
+            add_config_subentry_id=subentry_id,
+        )
+
+    entity_id = entity_registry.async_get_entity_id("climate", DOMAIN, f"matouch_{format_mac(mac)}")
+    if entity_id is not None:
+        updates: dict = {"config_entry_id": parent.entry_id, "config_subentry_id": subentry_id}
+        if device is not None:
+            updates["device_id"] = device.id
+        entity_registry.async_update_entity(entity_id, **updates)
+
+
+def _ensure_subentry(
+    hass: HomeAssistant,
+    parent: MAConfigEntry,
+    mac: str,
+    address: str,
+    name: str,
+    pin: str | None,
+) -> None:
+    """Idempotently represent one thermostat as a subentry on `parent` and re-home
+    its existing device + climate entity. Safe to call repeatedly (skips the add when
+    a subentry for this MAC already exists), so concurrent/re-run migrations converge.
+    """
+
+    existing = next(
+        (
+            se
+            for se in parent.subentries.values()
+            if se.subentry_type == SUBENTRY_TYPE_THERMOSTAT
+            and se.unique_id
+            and format_mac(se.unique_id) == mac
+        ),
+        None,
+    )
+    if existing is not None:
+        subentry_id = existing.subentry_id
+    else:
+        subentry = ConfigSubentry(
+            data=MappingProxyType({CONF_ADDRESS: address, CONF_NAME: name, CONF_PIN: pin}),
+            subentry_type=SUBENTRY_TYPE_THERMOSTAT,
+            title=name,
+            unique_id=address,
+        )
+        hass.config_entries.async_add_subentry(parent, subentry)
+        subentry_id = subentry.subentry_id
+
+    _adopt_existing_records(hass, mac, parent, subentry_id)
+
+
+async def async_migrate_entry(hass: HomeAssistant, entry: MAConfigEntry) -> bool:
+    """Adopt pre-fork config entries into the parent + per-thermostat-subentry model.
+
+    Upstream (cyaneous <=0.6.x) created ONE config entry per thermostat
+    (unique_id = MAC, data = {mac_address, pin}). This fork uses ONE parent entry
+    (unique_id = DOMAIN) with a 'thermostat' subentry per device. Without this hook
+    those old entries load empty and bluetooth discovery mints duplicate devices.
+
+    Strategy (serialized so concurrent per-entry calls don't each make a parent):
+      - The first legacy entry is PROMOTED in place to become the single parent.
+      - Every other legacy entry FOLDS its thermostat into that parent as a subentry,
+        then removes itself (deferred — we're mid-migration of that very entry).
+      - The existing device + climate entity are re-homed to the subentry so
+        entity_id and history survive.
+
+    Early-fork parent entries (unique_id == DOMAIN) predate this VERSION and only
+    need a version bump — they are already the right shape.
+    """
+
+    # Already the parent shape (a real v2 install or an early-fork v1 parent): just
+    # ensure the version is current so this doesn't re-run every start.
+    if entry.unique_id == DOMAIN:
+        if entry.version != 2:
+            hass.config_entries.async_update_entry(entry, version=2)
+        return True
+
+    mac = _legacy_mac(entry)
+    if mac is None:
+        _LOGGER.error("Cannot migrate MA Touch entry %s: no MAC in data/unique_id", entry.entry_id)
+        return False
+
+    pin = entry.data.get(CONF_PIN) or entry.data.get("pin")
+    name = entry.title or f"MA Touch {mac}"
+    # The fork stores the canonical HA BLE address (uppercase) in subentry data; the
+    # registry rows key off format_mac (lowercase). Keep both straight: `address`
+    # for subentry data/unique_id, `format_mac(mac)` for device/entity adoption.
+    address = mac.upper()
+
+    async with _MIGRATION_LOCK:
+        parent = next(
+            (e for e in hass.config_entries.async_entries(DOMAIN) if e.unique_id == DOMAIN),
+            None,
+        )
+        promoting = parent is None
+        if promoting:
+            # Promote THIS entry in place to be the single parent.
+            hass.config_entries.async_update_entry(
+                entry, unique_id=DOMAIN, title="Mitsubishi MA Touch", data={}, version=2
+            )
+            parent = entry
+
+        # Adopt this entry's own thermostat (using values captured BEFORE the promote
+        # above wiped this entry's data).
+        _ensure_subentry(hass, parent, mac, address, name, pin)
+
+        # If we just created the parent, its async_setup_entry is about to run and must
+        # see EVERY subentry. So fold all other still-legacy entries up front now,
+        # before any setup enumerates — this makes the upstream->fork path race-free
+        # regardless of HA's entry-setup concurrency. Idempotent: each sibling also
+        # self-confirms and removes itself when its own migration runs.
+        if promoting:
+            for other in hass.config_entries.async_entries(DOMAIN):
+                if other.entry_id == entry.entry_id or other.unique_id == DOMAIN:
+                    continue
+                other_mac = _legacy_mac(other)
+                if other_mac is None:
+                    continue
+                _ensure_subentry(
+                    hass,
+                    parent,
+                    other_mac,
+                    other_mac.upper(),
+                    other.title or f"MA Touch {other_mac}",
+                    other.data.get(CONF_PIN) or other.data.get("pin"),
+                )
+
+        if parent is not entry:
+            # This legacy per-device entry is now folded into the parent; drop it.
+            # Deferred (not awaited) because we're inside this entry's own migration;
+            # device/entity are already re-homed, so nothing is orphaned. Left at
+            # version 1 so an interrupted removal just re-folds idempotently next start.
+            _LOGGER.info("Folded MA Touch %s into the parent entry; removing legacy entry", mac)
+            hass.async_create_task(hass.config_entries.async_remove(entry.entry_id))
+
+    return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: MAConfigEntry) -> bool:
