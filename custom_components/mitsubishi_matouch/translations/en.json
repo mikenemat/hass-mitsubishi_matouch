@@ -27,7 +27,7 @@
     },
     "abort": {
       "no_devices_found": "No MA Touch thermostats found nearby. Make sure they are powered and within range of a Bluetooth proxy, then try again.",
-      "already_configured": "[%key:common::config_flow::abort::already_configured_device%]"
+      "already_configured": "Mitsubishi MA Touch is already set up. To add another thermostat, open the existing entry and use the 'Add thermostat' button — you don't need a second entry."
     },
     "error": {
       "invalid_pin": "PIN must be 4 digits"
@@ -58,7 +58,7 @@
         }
       },
       "abort": {
-        "already_configured": "[%key:common::config_flow::abort::already_configured_device%]"
+        "already_configured": "That thermostat is already added."
       },
       "error": {
         "invalid_pin": "PIN must be 4 digits",

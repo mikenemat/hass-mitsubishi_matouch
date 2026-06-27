@@ -4,6 +4,15 @@ This is a hardened fork of [cyaneous/hass-mitsubishi_matouch](https://github.com
 focused on running several MA Touch (PAR-CT01MAU) thermostats reliably over ESP32
 Bluetooth proxies, 24/7.
 
+## 0.14.2
+
+- **Fix raw translation placeholder in the config flow.** The "already configured"
+  abort messages referenced Home Assistant's core string via
+  `[%key:common::config_flow::abort::already_configured_device%]`, which only resolves
+  for core integrations — so a custom install leaked the literal placeholder text into
+  the dialog. Replaced with plain messages (parent flow points you to "Add thermostat"
+  on the existing entry; subentry flow says the thermostat is already added).
+
 ## 0.14.1
 
 - **Fix migration duplicate-device (regression in 0.14.0).** When a pre-fork entry
