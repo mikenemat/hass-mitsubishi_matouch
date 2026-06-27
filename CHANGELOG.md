@@ -4,6 +4,17 @@ This is a hardened fork of [cyaneous/hass-mitsubishi_matouch](https://github.com
 focused on running several MA Touch (PAR-CT01MAU) thermostats reliably over ESP32
 Bluetooth proxies, 24/7.
 
+## 0.14.3
+
+- **Fix reload leaving every unit unavailable.** Setup blocked on a sequential
+  per-thermostat BLE connect + firmware read (`async_config_entry_first_refresh`). On a
+  **Reload**, the previous links are torn down first, so an immediate reconnect could
+  hang and the GATT read got cancelled — and because it was the blocking first refresh,
+  that cancelled the **whole** config entry with no retry, leaving all thermostats
+  unavailable until a full restart. Setup now completes immediately and runs each unit's
+  first poll in the background; a slow/flaky unit retries on its own backoff without
+  taking down its siblings or the entry. (Startup was never affected — only reload.)
+
 ## 0.14.2
 
 - **Fix raw translation placeholder in the config flow.** The "already configured"

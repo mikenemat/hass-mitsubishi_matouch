@@ -12,7 +12,6 @@ from homeassistant.components import bluetooth
 from homeassistant.core import HomeAssistant, ServiceCall, ServiceResponse, SupportsResponse, callback
 from homeassistant.const import CONF_ADDRESS, CONF_NAME, CONF_PIN, Platform
 from homeassistant.config_entries import ConfigSubentry
-from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.helpers.debounce import Debouncer
 from homeassistant.helpers.device_registry import CONNECTION_BLUETOOTH, format_mac
@@ -113,15 +112,6 @@ def _build_coordinator(hass: HomeAssistant, entry: MAConfigEntry, subentry: Conf
         log_polls=entry.options.get("log_polls", False),
         capture_raw_frames=entry.options.get("capture_raw_frames", False),
     )
-
-
-async def _first_refresh(coordinator: MACoordinator, address: str) -> None:
-    """First refresh that tolerates a unit being briefly unreachable at startup."""
-
-    try:
-        await coordinator.async_config_entry_first_refresh()
-    except ConfigEntryNotReady:
-        _LOGGER.warning("MA Touch '%s' not ready yet; it will retry", address)
 
 
 # HA runs async_migrate_entry once per stored entry, concurrently. This lock
@@ -348,11 +338,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: MAConfigEntry) -> bool:
         if subentry.subentry_type != SUBENTRY_TYPE_THERMOSTAT:
             continue
         coordinator = _build_coordinator(hass, entry, subentry)
-        await _first_refresh(coordinator, subentry.data[CONF_ADDRESS])
         runtime.coordinators[subentry.subentry_id] = coordinator
         runtime.subentry_data[subentry.subentry_id] = dict(subentry.data)
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
+    # Kick off each unit's first poll in the BACKGROUND instead of blocking setup on a
+    # sequential BLE connect+read per unit. Blocking is fragile on RELOAD: right after
+    # unload tears the previous links down, an immediate reconnect can hang and the
+    # GATT read gets cancelled — and as the blocking first refresh that failed the
+    # WHOLE entry with no retry (every unit unavailable, no recovery). Backgrounding
+    # means setup always completes fast; entities show 'unavailable' until their first
+    # poll lands, and a slow/flaky unit just retries on its own backoff without taking
+    # down its siblings or the entry.
+    for subentry_id, coordinator in runtime.coordinators.items():
+        entry.async_create_background_task(
+            hass, coordinator.async_refresh(), f"mitsubishi_matouch-init-{subentry_id}"
+        )
+
     entry.async_on_unload(entry.add_update_listener(_update_listener))
 
     # Active rebalance. A single Debouncer single-flights + coalesces all rebalance
