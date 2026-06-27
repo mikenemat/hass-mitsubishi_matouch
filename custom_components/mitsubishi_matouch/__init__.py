@@ -228,15 +228,15 @@ async def async_migrate_entry(hass: HomeAssistant, entry: MAConfigEntry) -> bool
       - The existing device + climate entity are re-homed to the subentry so
         entity_id and history survive.
 
-    Early-fork parent entries (unique_id == DOMAIN) predate this VERSION and only
-    need a version bump — they are already the right shape.
+    Early-fork parent entries (unique_id == DOMAIN) predate this version and only
+    need a minor-version bump — they are already the right shape.
     """
 
-    # Already the parent shape (a real v2 install or an early-fork v1 parent): just
-    # ensure the version is current so this doesn't re-run every start.
+    # Already the parent shape (a current install or an early-fork parent): just
+    # ensure the minor version is current so this doesn't re-run every start.
     if entry.unique_id == DOMAIN:
-        if entry.version != 2:
-            hass.config_entries.async_update_entry(entry, version=2)
+        if entry.minor_version != 2:
+            hass.config_entries.async_update_entry(entry, minor_version=2)
         return True
 
     mac = _legacy_mac(entry)
@@ -260,7 +260,7 @@ async def async_migrate_entry(hass: HomeAssistant, entry: MAConfigEntry) -> bool
         if promoting:
             # Promote THIS entry in place to be the single parent.
             hass.config_entries.async_update_entry(
-                entry, unique_id=DOMAIN, title="Mitsubishi MA Touch", data={}, version=2
+                entry, unique_id=DOMAIN, title="Mitsubishi MA Touch", data={}, minor_version=2
             )
             parent = entry
 
@@ -292,8 +292,8 @@ async def async_migrate_entry(hass: HomeAssistant, entry: MAConfigEntry) -> bool
         if parent is not entry:
             # This legacy per-device entry is now folded into the parent; drop it.
             # Deferred (not awaited) because we're inside this entry's own migration;
-            # device/entity are already re-homed, so nothing is orphaned. Left at
-            # version 1 so an interrupted removal just re-folds idempotently next start.
+            # device/entity are already re-homed, so nothing is orphaned. Left
+            # version-unbumped so an interrupted removal just re-folds idempotently next start.
             _LOGGER.info("Folded MA Touch %s into the parent entry; removing legacy entry", mac)
             hass.async_create_task(hass.config_entries.async_remove(entry.entry_id))
 

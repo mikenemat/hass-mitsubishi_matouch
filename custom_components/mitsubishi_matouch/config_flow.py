@@ -91,10 +91,11 @@ async def _collect_matouch(hass, found: dict[str, BluetoothServiceInfoBleak], ex
 class MAConfigFlow(ConfigFlow, domain=DOMAIN):
     """Parent config flow for Mitsubishi MA Touch."""
 
-    # v2 = parent-entry + per-thermostat subentry model. Bumped from the implicit v1
-    # so async_migrate_entry runs on (a) pre-fork cyaneous per-device entries and
-    # (b) early-fork parent entries created before VERSION was declared.
-    VERSION = 2
+    # Bump the MINOR version (not MAJOR) so async_migrate_entry runs on (a) pre-fork
+    # cyaneous per-device entries and (b) early-fork parent entries created before any
+    # version was declared — while keeping in-place DOWNGRADES allowed (HA only blocks
+    # major-version downgrades with MIGRATION_ERROR). That keeps "revert via HACS" clean.
+    MINOR_VERSION = 2
 
     def __init__(self) -> None:
         """Initialize the config flow."""
