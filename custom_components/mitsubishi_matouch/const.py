@@ -83,5 +83,13 @@ MAX_BACKOFF_INTERVAL = 120
 # only fires entity updates on a success or the FIRST failure of a streak, so a
 # time-based "stale" grey-out would otherwise never be re-checked during a sustained
 # outage (the card stays online showing stale data). A timer nudges listeners while a
-# unit is failing so it greys on schedule.
+# unit is failing so it greys on schedule. The same tick re-evaluates the
+# "wedged" (discoverable-but-won't-connect) Repairs notice below.
 AVAILABILITY_TICK_INTERVAL = 15
+
+# How long a unit may stay DISCOVERABLE (a proxy sees it advertising) while EVERY
+# connect/poll fails before we raise a Repairs notice that its radio is likely wedged
+# and needs a power cycle. Set well above the normal periodic drop-and-reconnect blip
+# (and above the exponential backoff) so an ordinary recoverable hiccup never trips it;
+# only a genuinely stuck unit (advertising yet unjoinable for this long) does.
+WEDGED_UNIT_THRESHOLD = 600

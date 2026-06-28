@@ -22,7 +22,7 @@ from .btmatouch.exceptions import MAException, MAAuthException, MAControlRequest
 from .models import MAConfigEntry
 from .proxy_balancer import MAProxyBalancer
 from .telemetry import MATelemetryLog
-from .const import DOMAIN, MAX_BACKOFF_INTERVAL
+from .const import DOMAIN, MAX_BACKOFF_INTERVAL, WEDGED_UNIT_THRESHOLD
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -87,6 +87,13 @@ class MACoordinator(DataUpdateCoordinator):
         self._issue_id = f"invalid_pin_{address}"
         self._auth_issue_active = False
         self._auth_fail_streak = 0
+        # "Wedged radio" Repairs issue: the unit is DISCOVERABLE (a proxy sees it
+        # advertising) but every connect/poll keeps failing. _discoverable_fail_since
+        # marks when that streak began (None whenever the unit is offline, the link
+        # works, or a poll succeeds); is_wedged trips once it exceeds the threshold.
+        self._wedged_issue_id = f"wedged_{address}"
+        self._wedged_issue_active = False
+        self._discoverable_fail_since: float | None = None
         self._prev_connect_count = 0
         self._prev_disconnect_count = 0
         self._prev_status_hex: str | None = None
@@ -174,6 +181,25 @@ class MACoordinator(DataUpdateCoordinator):
             return True
         threshold = max(self._base_interval * 4, _STALE_FLOOR)
         return (time.monotonic() - self._last_success_monotonic) > threshold
+
+    @property
+    def is_wedged(self) -> bool:
+        """True when the thermostat is DISCOVERABLE (a proxy sees it advertising) yet
+        every connect/poll has failed for longer than WEDGED_UNIT_THRESHOLD — i.e. its
+        BLE radio is wedged and almost always needs a power cycle (something the
+        integration cannot do for it).
+
+        Deliberately distinct from the other failure modes so the Repairs notice only
+        fires on the one the user can actually act on:
+          - 'offline' (not discoverable) leaves _discoverable_fail_since None;
+          - a wrong PIN ('auth') or a rejected control ('control') means the link
+            actually works (the device answered), so it isn't wedged;
+          - an ordinary periodic drop recovers (success) long before the threshold.
+        """
+
+        if self._discoverable_fail_since is None:
+            return False
+        return (time.monotonic() - self._discoverable_fail_since) > WEDGED_UNIT_THRESHOLD
 
     @callback
     def _clear_active_proxy(self) -> None:
@@ -263,6 +289,35 @@ class MACoordinator(DataUpdateCoordinator):
         ir.async_delete_issue(self.hass, DOMAIN, self._issue_id)
         self._auth_issue_active = False
         self._auth_fail_streak = 0
+
+    @callback
+    def raise_wedged_issue(self) -> None:
+        """Surface a Repairs issue: this thermostat is reachable over Bluetooth but
+        won't connect, so its radio is likely wedged and needs a power cycle. Driven
+        by the availability tick (which gates it on the rest of the fleet being
+        healthy). Idempotent (skips if already raised)."""
+
+        if self._wedged_issue_active:
+            return
+        ir.async_create_issue(
+            self.hass,
+            DOMAIN,
+            self._wedged_issue_id,
+            is_fixable=False,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key="wedged",
+            translation_placeholders={"name": self.device_name},
+        )
+        self._wedged_issue_active = True
+
+    @callback
+    def clear_wedged_issue(self) -> None:
+        """Remove the wedged-radio Repairs issue (on recovery or removal). Safe to
+        call when none exists (no-op), so it also clears a stale issue left by a
+        previous coordinator instance across a reload."""
+
+        ir.async_delete_issue(self.hass, DOMAIN, self._wedged_issue_id)
+        self._wedged_issue_active = False
 
     @callback
     def _note_connection_source(self) -> None:
@@ -410,6 +465,7 @@ class MACoordinator(DataUpdateCoordinator):
             result = self._apply_pending_targets_to_status(status)
             self._reset_backoff()
             self.clear_auth_issue()
+            self.clear_wedged_issue()
             await self._record_poll(
                 True,
                 room_temperature=status.room_temperature,
@@ -621,10 +677,22 @@ class MACoordinator(DataUpdateCoordinator):
             self._last_success_monotonic = time.monotonic()
             self._last_fail_persist = None
             self._last_fail_error = None
+            # Link is healthy again: clear the wedged-radio streak (see is_wedged).
+            self._discoverable_fail_since = None
             persist = self._log_polls
         else:
             error = extra.get("error")
             now = time.monotonic()
+            # Track the "discoverable but won't connect" streak that feeds is_wedged.
+            # Only a connectivity failure on a unit we could actually reach ('link' /
+            # 'poll_timeout') counts: 'not_discoverable' means it's offline, and
+            # 'auth'/'control' mean the device answered (so the radio works) — all of
+            # those reset the streak so the wedged notice never fires for them.
+            if error in ("link", "poll_timeout"):
+                if self._discoverable_fail_since is None:
+                    self._discoverable_fail_since = now
+            else:
+                self._discoverable_fail_since = None
             persist = (
                 error != self._last_fail_error
                 or self._last_fail_persist is None

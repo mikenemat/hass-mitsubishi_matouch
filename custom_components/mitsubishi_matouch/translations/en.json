@@ -82,6 +82,10 @@
     "invalid_pin": {
       "title": "{name}: incorrect PIN",
       "description": "Home Assistant couldn't authenticate to **{name}** — its PIN was rejected, so the thermostat can't be controlled.\n\nTo fix it, open **Settings → Devices & Services → Mitsubishi MA Touch**, find **{name}**, and choose **Reconfigure** to enter the correct PIN. The PIN is on the thermostat under **Settings → Bluetooth** (enable Bluetooth in the admin settings first; default code 0000).\n\nThis alert clears automatically once the correct PIN connects."
+    },
+    "wedged": {
+      "title": "{name}: reachable but won't connect",
+      "description": "Home Assistant can see **{name}** advertising over Bluetooth (a proxy is in range), but every attempt to connect to it has failed for several minutes — so it can't be read or controlled. Your other thermostats are connecting normally.\n\nThis almost always means the thermostat's Bluetooth radio has wedged. **Power-cycle the thermostat** — cut power to it for about 30 seconds (e.g. flip the breaker for that air handler, or disconnect and reseat the controller) — to reset its radio. It should reconnect within a minute.\n\nIf power-cycling doesn't help, make sure a Bluetooth proxy is close enough for a solid signal. This alert clears automatically once the thermostat reconnects."
     }
   },
   "entity": {

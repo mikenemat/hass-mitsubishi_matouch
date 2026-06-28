@@ -4,6 +4,21 @@ This is a hardened fork of [cyaneous/hass-mitsubishi_matouch](https://github.com
 focused on running several MA Touch (PAR-CT01MAU) thermostats reliably over ESP32
 Bluetooth proxies, 24/7.
 
+## 0.14.6
+
+- **Repairs notice for a wedged thermostat ("reachable but won't connect").** A unit
+  can get into a state where its BLE radio keeps advertising (proxies see it, it shows
+  multiple connection paths) but every connect/poll fails — so it goes `unavailable`
+  and silently stays there for hours until someone notices and power-cycles it. The
+  integration can't reset the unit's radio, but it can now *tell you*: when a unit is
+  discoverable yet unjoinable for >10 min **while the rest of the fleet is healthy**, a
+  Home Assistant *Repairs* issue is raised naming the unit and recommending a power
+  cycle. It clears automatically the moment the unit reconnects. The detection is
+  carefully scoped so it never fires for the benign cases — an offline/out-of-range
+  unit (not discoverable), a wrong PIN or rejected command (the device answered, so the
+  link works), or an ordinary periodic drop that recovers well under the threshold. The
+  fleet-health gate keeps a global proxy outage from mis-blaming a single thermostat.
+
 ## 0.14.5
 
 - **Fix: units still wouldn't grey on a sustained outage (follow-up to 0.14.4).** The

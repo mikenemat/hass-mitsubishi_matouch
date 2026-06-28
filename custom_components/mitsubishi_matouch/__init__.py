@@ -398,9 +398,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: MAConfigEntry) -> bool:
         rt = entry.runtime_data
         if rt is None:
             return
-        for coordinator in rt.coordinators.values():
+        coordinators = list(rt.coordinators.values())
+        for coordinator in coordinators:
             if coordinator.data is not None and not coordinator.last_update_success:
                 coordinator.async_update_listeners()
+            # Wedged-radio Repairs notice: a unit that's been discoverable-but-
+            # unjoinable for a sustained period (see MACoordinator.is_wedged). Gate it
+            # on at least one OTHER unit being healthy so a systemic outage (all
+            # proxies down, HA bluetooth issue) never mis-blames a single thermostat;
+            # with no siblings to compare against, trust the wedge signature itself.
+            others = [c for c in coordinators if c is not coordinator]
+            siblings_ok = not others or any(c.last_update_success for c in others)
+            if coordinator.is_wedged and siblings_ok:
+                coordinator.raise_wedged_issue()
+            else:
+                coordinator.clear_wedged_issue()
 
     entry.async_on_unload(
         async_track_time_interval(hass, _availability_tick, timedelta(seconds=AVAILABILITY_TICK_INTERVAL))
@@ -450,6 +462,7 @@ async def _stop_subentry(hass: HomeAssistant, entry: MAConfigEntry, subentry_id:
     coordinator = entry.runtime_data.coordinators.pop(subentry_id, None)
     if coordinator is not None:
         coordinator.clear_auth_issue()
+        coordinator.clear_wedged_issue()
         await coordinator.async_shutdown()
         await coordinator.async_close_connection()
 
