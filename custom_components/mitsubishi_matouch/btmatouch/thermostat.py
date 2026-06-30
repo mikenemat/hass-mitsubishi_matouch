@@ -382,11 +382,13 @@ class Thermostat:
         self._login_responses["0x0401"] = (await self._async_write_request(request)).hex()
 
         # NOTE: device-info fetch (async_get_device_info) intentionally NOT called here.
-        # In v0.14.12 calling it during login broke ALL units: the device replies to the
-        # 0x0003 get-data with a 2-byte runt that desynced the frame assembler and failed
-        # every subsequent poll (units went unavailable). The request framing is wrong
-        # and/or the receive buffer doesn't recover from a runt. Left dormant until both
-        # are fixed and validated. DO NOT re-enable on the login path without that.
+        # It must run as its own job from IDLE (begin-0 -> begin-3 -> a(0,0) -> end-3 ->
+        # end-0); a session-3 begin issued after this login (which has opened the session-4
+        # operation session via 0x0401) gets result 0x02 RESTART_JOB, not the caps. It is
+        # driven on-demand for a single unit by the coordinator (close -> fresh connect ->
+        # async_get_device_info -> disconnect). DO NOT re-enable on the login/poll path:
+        # in v0.14.12 an experimental request here desynced the assembler and took ALL
+        # units offline in a reconnect loop. On-demand + single-unit only.
 
     async def async_logout(self, pin: int) -> None:
         """Unknown messages at end of connection.
@@ -436,49 +438,59 @@ class Thermostat:
         return status
 
     async def async_get_device_info(self) -> dict[str, str]:
-        """Fetch the device-info / capability blob via the full session-3 sequence and
-        return each frame's raw response hex ({begin, data, end}) for diagnosis.
+        """Fetch the device-info / capability blob and return each frame's raw
+        response hex ({begin0, begin3, data, end3, end0}) for diagnosis/parsing.
 
-        Per the MELRemo SDK, the device-info command is a DATA frame (0x0005 = L2 data
-        phase + L3 a(0,0)) that only works INSIDE a session_type-3 session — so it must
-        be wrapped: begin-session-3 (with the stored PIN) -> 0x0005 -> end-session-3.
-        (An earlier attempt sent 0x0003 standalone, which the device rejected and dropped
-        the link, because 0x03 is the end-session phase byte.) Response body carries the
-        per-unit capabilities (model/m0/i/a, ~76-77 bytes).
+        Constraint-verified against the decompiled MELRemo SDK (byte-exact). The
+        capability blob is a DATA frame (0x0005 = L2 data phase 0x05 + L3 a(0,0))
+        that the device only answers while session_type 3 is the ACTIVE session.
+        Two hard facts the SDK settled:
+          * The ordinary USER PIN opens session 3 — ADMIN is NOT required for the
+            capability blob (only for serviceman op-data). So the stored PIN is
+            used throughout, request_flag 0x01 (first-send) on the credential
+            frames, 0x00 on the data frame.
+          * A session-3 begin CANNOT be opened on top of the live operation
+            session (session 4): the device returns result 0x02 (RESTART_JOB,
+            previously mislabeled BAD_PIN). So device-info must run as its own job
+            from IDLE — begin-0 -> begin-3 -> data a(0,0) -> end-3 -> end-0 —
+            mirroring the SDK login job (controller/c0.d), which itself opens
+            session 3 and issues a(0,0) on every login.
 
-        ON-DEMAND ONLY. NOT to be called on the login/poll path — a failure fails just
-        this call (at most one reconnect), it cannot loop. validate=False throughout so
-        unexpected acks don't raise and the raw capability bytes are returned.
+        PRECONDITION: a FRESH connection in IDLE (connected, NOT logged in). The
+        coordinator closes the operation link and reconnects without login before
+        calling this; running it on a logged-in link returns 0x02 / a status frame,
+        not the caps. ON-DEMAND ONLY, never on the recurring poll/login path
+        (v0.14.12 outage lesson). All writes use validate=False so the raw
+        responses (incl. result codes) are observable and an unexpected ack can't
+        raise mid-sequence — each frame is also individually guarded so a desync
+        on one frame still records the others.
         """
 
-        # Device-info is a PRE-AUTH GUEST read (the USER PIN returns BAD_PIN on session 3).
-        # GUEST credentials = user_type 0 (request_flag 0), password "AAAA" (0xAAAA),
-        # license_type 0 + license "0000" (the Const-0 unknown_1/2/3). Confirmed: the
-        # MELRemo begin-session GUEST userInfo is "AAAA"/"0000".
-        guest_pw = 0xAAAA
+        pin = self._pin
         out: dict[str, str] = {}
 
-        try:
-            begin = _MAAuthenticatedRequest(
-                message_type=_MAMessageType.BEGIN_SESSION_3, request_flag=0x00, pin=guest_pw
-            )
-            out["begin"] = (await self._async_write_request(begin, validate=False)).hex()
-        except Exception as ex:  # noqa: BLE001
-            out["begin"] = f"error: {ex}"
+        async def _send(label: str, request) -> None:
+            try:
+                out[label] = (await self._async_write_request(request, validate=False)).hex()
+            except Exception as ex:  # noqa: BLE001
+                out[label] = f"error: {ex}"
 
-        try:
-            info = _MAStatusRequest(message_type=_MAMessageType.DEVICE_INFO_REQUEST, request_flag=0x00)
-            out["data"] = (await self._async_write_request(info, validate=False)).hex()
-        except Exception as ex:  # noqa: BLE001
-            out["data"] = f"error: {ex}"
-
-        try:
-            end = _MAAuthenticatedRequest(
-                message_type=_MAMessageType.END_SESSION_3, request_flag=0x00, pin=guest_pw
-            )
-            out["end"] = (await self._async_write_request(end, validate=False)).hex()
-        except Exception as ex:  # noqa: BLE001
-            out["end"] = f"error: {ex}"
+        # begin session 0 (outer operation session, USER) — identical frame to LOGIN.
+        await _send("begin0", _MAAuthenticatedRequest(
+            message_type=_MAMessageType.LOGIN_REQUEST, request_flag=0x01, pin=pin))
+        # begin session 3 (device-info session, USER). Resp result byte 0 == ok,
+        # 0x02 == RESTART_JOB (we're not actually in IDLE), 0x0a == real bad PIN.
+        await _send("begin3", _MAAuthenticatedRequest(
+            message_type=_MAMessageType.BEGIN_SESSION_3, request_flag=0x01, pin=pin))
+        # data a(0,0) — the capability blob (~76-77 bytes). THIS is the payload we want.
+        await _send("data", _MAStatusRequest(
+            message_type=_MAMessageType.DEVICE_INFO_REQUEST, request_flag=0x00))
+        self._last_device_info_hex = out.get("data")
+        # end session 3, then end session 0 (== message_type 0x0003) — clean teardown.
+        await _send("end3", _MAAuthenticatedRequest(
+            message_type=_MAMessageType.END_SESSION_3, request_flag=0x01, pin=pin))
+        await _send("end0", _MAAuthenticatedRequest(
+            message_type=_MAMessageType.UNKNOWN_1, request_flag=0x01, pin=pin))
 
         return out
 
@@ -798,9 +810,13 @@ class Thermostat:
                     return response_bytes
                 case _MAResult.IN_MENUS:
                     raise MAResponseException(f"Failure result received: {response_header.result} - thermostat in menus?")
+                case _MAResult.RESTART_JOB:
+                    # 0x02: the device asked to restart the job (a transient state /
+                    # out-of-order-session rejection) — NOT a wrong PIN. Surface it as a
+                    # retryable link error so the coordinator drops + reconnects, instead
+                    # of misreading it as auth failure and raising a false bad-PIN notice.
+                    raise MAResponseException("Device requested job restart (result 0x02, transient)")
                 case _MAResult.BAD_PIN:
-                    raise MAAuthException("Failure result received: Incorrect PIN?")
-                case _MAResult.UNKNOWN_3_BAD_PIN:
                     raise MAAuthException("Failure result received: Incorrect PIN?")
                 case _:
                     raise MAResponseException(f"Failure result received: {response_header.result}")

@@ -38,11 +38,13 @@ _POLL_TIMEOUT = 30
 _STALE_FLOOR = 45
 # Minimum seconds between persisting repeated identical poll failures to the file.
 _FAILURE_LOG_INTERVAL = 60
-# Consecutive bad-PIN responses required before raising the Repairs issue. The
-# controller is observed to return a spurious one-off BAD_PIN with the CORRECT PIN
-# (the inbound response checksum isn't validated yet, so a corrupted reply whose
-# result byte reads 0x02 is misread as a wrong PIN). Require several in a row, reset
-# on any success — a real wrong PIN still flags in ~3 polls; isolated flukes never do.
+# Consecutive bad-PIN responses required before raising the Repairs issue. Two
+# historical sources of a false one-off bad PIN are now closed: (1) a corrupted reply
+# whose result byte landed on a failure code is caught by the inbound checksum
+# validation; (2) result 0x02 was mislabeled BAD_PIN when it actually means
+# RESTART_JOB (a transient state rejection) — it is now handled as a retryable link
+# error, not auth. The real bad PIN is result 0x0A. Still require several in a row and
+# reset on any success, so a genuine wrong PIN flags in ~3 polls while flukes never do.
 _AUTH_FAIL_THRESHOLD = 3
 
 
@@ -387,18 +389,32 @@ class MACoordinator(DataUpdateCoordinator):
         failure counter (which is what left units looking online through a full outage).
         """
 
-        await self._thermostat.async_ensure_connected()
-        self._note_connection_source()
-
-        # DEBUG/RE: run a requested device-info fetch here (serialized inside the poll, so
-        # its begin/data/end session-3 frames can't interleave with a status request).
-        # Best-effort: never let it break the poll/status read.
+        # DEBUG/RE: on-demand device-info fetch (capability blob). Per the decompiled
+        # MELRemo SDK the blob is a session-3 DATA frame (a(0,0)) the device only answers
+        # while session 3 is the ACTIVE session — and a session-3 begin can't be opened on
+        # top of the live operation session (session 4): the device returns 0x02
+        # RESTART_JOB. So device-info must run as its own job from IDLE: do it on a FRESH
+        # connection with NO login, tear it down, then fall through to the normal
+        # connect+login+status below. On-demand + single-unit only — NEVER the recurring
+        # fleet path (v0.14.12 outage). Best-effort: a failure here can't break the poll
+        # (the status read below still runs on a clean reconnect). Runs first, while the
+        # link is still IDLE, so begin-session-3 isn't rejected by an open session 4.
         if self._device_info_request:
             self._device_info_request = False
             try:
+                await self._thermostat.async_close()    # drop session 4 -> device returns to IDLE
+                await self._thermostat.async_connect()  # fresh link, NOT logged in (IDLE)
                 self._device_info_result = await self._thermostat.async_get_device_info()
             except Exception as ex:  # noqa: BLE001
                 self._device_info_result = {"error": str(ex)}
+            finally:
+                try:
+                    await self._thermostat.async_disconnect()
+                except Exception:  # noqa: BLE001
+                    pass
+
+        await self._thermostat.async_ensure_connected()
+        self._note_connection_source()
 
         # Process pending control updates over the live connection. Clear a queued
         # value only after a successful write so failures can retry.
@@ -496,7 +512,11 @@ class MACoordinator(DataUpdateCoordinator):
 
         started = time.monotonic()
         try:
-            async with asyncio.timeout(_POLL_TIMEOUT):
+            # A pending device-info fetch makes this poll do extra work (close + fresh
+            # IDLE connect + 5-frame session-3 job + disconnect, THEN the normal
+            # reconnect+login+status), so give it more headroom than a plain poll.
+            poll_timeout = max(_POLL_TIMEOUT, 60) if self._device_info_request else _POLL_TIMEOUT
+            async with asyncio.timeout(poll_timeout):
                 status = await self._run_poll()
             self.last_poll_duration = time.monotonic() - started
             result = self._apply_pending_targets_to_status(status)

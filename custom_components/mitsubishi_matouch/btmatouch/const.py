@@ -139,12 +139,24 @@ class _MAMessageType(EnumBase):
 
 
 class _MAResult(EnumBase):
-    """Result enumeration."""
+    """Result enumeration (response/result byte).
+
+    Values confirmed against the decompiled MELRemo SDK response table
+    (controller/i.java). NOTE a historical mislabel that this corrects: 0x02 is
+    NOT a bad PIN — it is the device asking the client to RESTART the job (a
+    transient state / out-of-order-session rejection). The real invalid-password
+    code is 0x0A. The old `BAD_PIN = 0x02` mapping raised false invalid-PIN
+    Repairs notices whenever the device legitimately returned 0x02.
+    """
 
     SUCCESS = 0x00
-    BAD_PIN = 0x02
-    IN_MENUS = 0x09
-    UNKNOWN_3_BAD_PIN = 0x0a
+    # Transient: "restart the job / session" (e.g. a session begun out of order,
+    # or a second session-begin on a link that already holds an open session).
+    # Treat as a retryable link error and reconnect — never as a wrong PIN.
+    RESTART_JOB = 0x02
+    RETRY = 0x08
+    IN_MENUS = 0x09  # observed live on control responses (user is in the device's menus)
+    BAD_PIN = 0x0a   # the real INVALID_PASSWORD (was named UNKNOWN_3_BAD_PIN)
 
 
 class _MAOperationModeFlags(FlagsEnumBase):
