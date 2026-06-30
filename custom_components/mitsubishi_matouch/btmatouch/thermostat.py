@@ -58,6 +58,14 @@ __all__ = ["Thermostat"]
 
 _LOGGER = logging.getLogger(__name__)
 
+# Sanity bound on an inbound frame's declared length (fail fast on a corrupt length
+# header instead of waiting out the response timeout for bytes that never arrive).
+# Status frames are ~60 bytes, but the device-info / capability blob is ~85 and a
+# legacy fault-history response can concatenate up to 16 records (~180 bytes), so the
+# old 64-byte bound was too tight. 512 covers every known multi-record response while
+# still rejecting a wildly corrupt length.
+_MAX_FRAME_LENGTH = 512
+
 
 class _RawRequest:
     """Minimal request wrapper for the debug/RE raw-send path: an explicit message_type
@@ -510,11 +518,12 @@ class Thermostat:
         lifecycle (device-info, fault history, energy, ...) be cracked LIVE against one
         unit without a redeploy per hypothesis.
 
-        Each step = {"message_type": int, "request_flag": int=1, "pin": bool=True}.
-        A pin=True step is an authenticated frame (message_type LE + flag + stored PIN
-        + 3 zero bytes); pin=False is a bare status-style frame (message_type LE + flag).
-        validate=False so an unexpected/failure ack is captured rather than raised, and
-        the sequence always runs to the end.
+        Each step = {"message_type": int, "request_flag": int=1, "pin": bool=True,
+        "payload": hex str=""}. Body = message_type(LE) + request_flag, then the stored
+        PIN + 3 zero bytes if pin=True (authenticated begin/end frame), then any extra
+        payload bytes. A data frame (e.g. fault history a(0,0x17) with an L3 index body)
+        is pin=False with the L3 body in `payload`. validate=False so an unexpected/
+        failure ack is captured rather than raised, and the sequence always runs to end.
 
         PRECONDITION: a fresh IDLE connection (the coordinator closes the operation link
         and reconnects without login before calling this). ON-DEMAND + single-unit only,
@@ -526,9 +535,12 @@ class Thermostat:
             mt = int(step["message_type"]) & 0xFFFF
             flag = int(step.get("request_flag", 0x01)) & 0xFF
             use_pin = bool(step.get("pin", True))
+            extra_hex = step.get("payload", "") or ""
+            extra = bytes.fromhex(extra_hex) if extra_hex else b""
             body = mt.to_bytes(2, "little") + bytes([flag])
             if use_pin:
                 body += (self._pin & 0xFFFF).to_bytes(2, "little") + b"\x00\x00\x00"
+            body += extra
             entry: dict[str, str] = {
                 "i": str(i), "mt": f"0x{mt:04x}", "flag": str(flag),
                 "pin": str(use_pin), "req": body.hex(),
@@ -989,7 +1001,7 @@ class Thermostat:
                 if len(data_bytes) < 3:
                     raise MAResponseException(f"Runt frame ({len(data_bytes)} bytes)")
                 header = _MAMessageHeader.from_bytes(data_bytes)
-                if header.length > 64:
+                if header.length > _MAX_FRAME_LENGTH:
                     raise MAResponseException(f"Frame too long: {header.length}")
                 self._receive_length = header.length
                 self._receive_buffer = data_bytes[2:]

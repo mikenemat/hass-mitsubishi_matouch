@@ -85,6 +85,7 @@ RUN_IDLE_SEQUENCE_SCHEMA = vol.Schema(
                     vol.Required("message_type"): vol.Coerce(int),
                     vol.Optional("request_flag", default=1): vol.All(vol.Coerce(int), vol.Range(min=0, max=255)),
                     vol.Optional("pin", default=True): cv.boolean,
+                    vol.Optional("payload", default=""): cv.string,
                 }
             )
         ],
