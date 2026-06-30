@@ -662,9 +662,9 @@ class MACoordinator(DataUpdateCoordinator):
 
         return await self._thermostat.async_send_raw_request(message_type, request_flag, payload)
 
-    async def async_fetch_device_info(self) -> bytes:
+    async def async_fetch_device_info(self) -> dict[str, str]:
         """DEBUG / RE on-demand: fetch the device-info / capability blob via the
-        session-3 begin/data/end sequence (see Thermostat.async_get_device_info)."""
+        session-3 begin/data/end sequence; returns each frame's response hex."""
 
         return await self._thermostat.async_get_device_info()
 

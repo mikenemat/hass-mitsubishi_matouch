@@ -147,8 +147,8 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         if coordinator is None:
             return {"error": f"no thermostat for mac {call.data['mac']}"}
         try:
-            resp = await coordinator.async_fetch_device_info()
-            return {"mac": coordinator.mac_address, "len": len(resp), "response_hex": resp.hex()}
+            frames = await coordinator.async_fetch_device_info()
+            return {"mac": coordinator.mac_address, "frames": frames}
         except Exception as ex:  # noqa: BLE001 - surface any error as data, never raise
             return {"mac": coordinator.mac_address, "error": str(ex)}
 

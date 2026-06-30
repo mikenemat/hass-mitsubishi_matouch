@@ -435,9 +435,9 @@ class Thermostat:
         #_LOGGER.debug("[%s] Status OUT: %s", self._mac_address, vars(status))
         return status
 
-    async def async_get_device_info(self) -> bytes:
+    async def async_get_device_info(self) -> dict[str, str]:
         """Fetch the device-info / capability blob via the full session-3 sequence and
-        return the raw response.
+        return each frame's raw response hex ({begin, data, end}) for diagnosis.
 
         Per the MELRemo SDK, the device-info command is a DATA frame (0x0005 = L2 data
         phase + L3 a(0,0)) that only works INSIDE a session_type-3 session — so it must
@@ -451,23 +451,31 @@ class Thermostat:
         unexpected acks don't raise and the raw capability bytes are returned.
         """
 
-        begin = _MAAuthenticatedRequest(
-            message_type=_MAMessageType.BEGIN_SESSION_3, request_flag=0x01, pin=self._pin
-        )
-        await self._async_write_request(begin, validate=False)
+        out: dict[str, str] = {}
 
-        info = _MAStatusRequest(message_type=_MAMessageType.DEVICE_INFO_REQUEST, request_flag=0x00)
-        resp = await self._async_write_request(info, validate=False)
+        try:
+            begin = _MAAuthenticatedRequest(
+                message_type=_MAMessageType.BEGIN_SESSION_3, request_flag=0x01, pin=self._pin
+            )
+            out["begin"] = (await self._async_write_request(begin, validate=False)).hex()
+        except Exception as ex:  # noqa: BLE001
+            out["begin"] = f"error: {ex}"
+
+        try:
+            info = _MAStatusRequest(message_type=_MAMessageType.DEVICE_INFO_REQUEST, request_flag=0x00)
+            out["data"] = (await self._async_write_request(info, validate=False)).hex()
+        except Exception as ex:  # noqa: BLE001
+            out["data"] = f"error: {ex}"
 
         try:
             end = _MAAuthenticatedRequest(
                 message_type=_MAMessageType.END_SESSION_3, request_flag=0x01, pin=self._pin
             )
-            await self._async_write_request(end, validate=False)
-        except Exception as ex:  # noqa: BLE001 - end-session is best-effort cleanup
-            _LOGGER.debug("[%s] device-info end-session failed: %s", self._mac_address, ex)
+            out["end"] = (await self._async_write_request(end, validate=False)).hex()
+        except Exception as ex:  # noqa: BLE001
+            out["end"] = f"error: {ex}"
 
-        return resp
+        return out
 
     async def async_send_raw_request(self, message_type: int, request_flag: int = 0x00, payload: bytes = b"") -> bytes:
         """DEBUG / RE ONLY: send one arbitrary request and return the raw response
