@@ -51,50 +51,30 @@ def _caps(c: MACoordinator):
     return c.capabilities
 
 
-# Capability sensors (DIAGNOSTIC). All read coordinator.capabilities, which is None
-# until the device-info blob is fetched (lazily, shortly after the first poll), so each
-# returns None until then. The "Indoor units" sensor also carries the FULL capability
-# detail (every supported axis + per-head info) in its attributes, so nothing is hidden.
+def _caps_summary(c: MACoordinator) -> str | None:
+    """Static, human-readable state for the Capabilities sensor (the full breakdown
+    lives in its attributes). Stays constant per unit, so it doesn't grow the recorder."""
+    caps = _caps(c)
+    if caps is None:
+        return None
+    n = caps.num_indoor_units
+    return f"{n} indoor unit{'s' if n != 1 else ''}"
+
+
+# Single capability sensor (DIAGNOSTIC). State is a static summary; the FULL capability
+# breakdown (modes, fan steps, vane, hold/louver/vent/move-eye support, per-head info)
+# is in its attributes, so everything is visible in one place (more-info, Dev Tools,
+# templates) without a swarm of entities — and being static it won't bloat history.
+# coordinator.capabilities is None until the device-info blob is fetched (lazily, shortly
+# after the first poll), so this reads 'unknown' until then.
 CAP_SENSORS: tuple[MASensorDescription, ...] = (
     MASensorDescription(
-        key="indoor_units",
-        name="Indoor units",
+        key="capabilities",
+        name="Capabilities",
         icon="mdi:hvac",
-        state_class=SensorStateClass.MEASUREMENT,
         entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda c: _caps(c).num_indoor_units if _caps(c) else None,
+        value_fn=_caps_summary,
         attrs_fn=lambda c: _caps(c).as_dict() if _caps(c) else None,
-    ),
-    MASensorDescription(
-        key="connection_type",
-        name="Connection type",
-        icon="mdi:hvac",
-        entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda c: _caps(c).connect_unit if _caps(c) else None,
-    ),
-    MASensorDescription(
-        key="fan_steps",
-        name="Fan steps",
-        state_class=SensorStateClass.MEASUREMENT,
-        entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda c: _caps(c).fan_steps if _caps(c) else None,
-    ),
-    MASensorDescription(
-        key="vane_positions",
-        name="Vane positions",
-        icon="mdi:arrow-oscillating",
-        state_class=SensorStateClass.MEASUREMENT,
-        entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda c: (
-            sum(1 for m in _caps(c).vane_modes() if m.isdigit()) if _caps(c) else None
-        ),
-    ),
-    MASensorDescription(
-        key="display_unit",
-        name="Display unit",
-        icon="mdi:temperature-celsius",
-        entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda c: _caps(c).temp_unit if _caps(c) else None,
     ),
 )
 
