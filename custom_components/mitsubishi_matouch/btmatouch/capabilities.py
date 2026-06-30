@@ -158,6 +158,35 @@ class Capabilities:
     def num_indoor_units(self) -> int:
         return len(self.indoor_units)
 
+    @property
+    def supports_swing(self) -> bool:
+        """Whether this unit has a controllable (swingable) vertical vane."""
+        return self.vane > 0
+
+    def fan_modes(self) -> list[str]:
+        """HA fan-mode strings this unit supports, by fan-step count + fan-auto.
+
+        The string values equal Home Assistant's FAN_LOW/MEDIUM/HIGH/AUTO constants
+        (kept as literals here so this module needs no HA import). Gating these is the
+        fix for the 'quiet'/speed-revert wart: a 3-step unit never offers 'quiet'.
+        """
+        speeds = {
+            2: ["low", "high"],
+            3: ["low", "medium", "high"],
+            4: ["quiet", "low", "medium", "high"],
+        }
+        modes = list(speeds.get(self.fan_steps, ["low", "medium", "high"]))
+        if self.fan_auto:
+            modes.append("auto")
+        return modes
+
+    def hvac_modes(self) -> dict[str, bool]:
+        """Supported-mode flags keyed by the lowercase HVAC name (off always implied)."""
+        return {
+            "heat": self.heat, "cool": self.cool, "auto": self.auto,
+            "dry": self.dry, "fan_only": self.fan,
+        }
+
     def as_dict(self) -> dict:
         """Flat, JSON-friendly view (for diagnostics / the fetch service)."""
         return {

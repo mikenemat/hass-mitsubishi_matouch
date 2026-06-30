@@ -68,16 +68,16 @@ class MAClimate(CoordinatorEntity[MACoordinator], ClimateEntity):
     _attr_name = None
     _attr_translation_key = "matouch"
 
-    _attr_supported_features = (
+    # Base features always present. SWING_MODE is added per-unit (supported_features)
+    # only when the unit has a controllable vane, so vane-less units don't show a swing
+    # control that would just revert.
+    _BASE_FEATURES = (
         ClimateEntityFeature.TARGET_TEMPERATURE
         | ClimateEntityFeature.TARGET_TEMPERATURE_RANGE
         | ClimateEntityFeature.FAN_MODE
-        | ClimateEntityFeature.SWING_MODE
         | ClimateEntityFeature.TURN_ON
         | ClimateEntityFeature.TURN_OFF
     )
-    _attr_hvac_modes = list(HA_TO_MA_HVAC.keys())
-    _attr_fan_modes = list(HA_TO_MA_FAN.keys())
     _attr_swing_modes = [SWING_ON, SWING_OFF]
 
     def __init__(self, coordinator: MACoordinator) -> None:
@@ -151,6 +151,46 @@ class MAClimate(CoordinatorEntity[MACoordinator], ClimateEntity):
         if self.coordinator.is_stale:
             return False
         return self.coordinator.consecutive_failures < 2
+
+    # --- capability gating ---------------------------------------------------
+    # Until the device-info blob is fetched (coordinator.capabilities is None) the
+    # entity keeps the full, ungated mode lists so nothing is hidden prematurely; once
+    # caps arrive these narrow to exactly what the unit supports.
+
+    @property
+    def _caps(self):
+        """Parsed per-unit capabilities, or None until first fetched."""
+        return self.coordinator.capabilities
+
+    @property
+    def supported_features(self) -> ClimateEntityFeature:
+        features = self._BASE_FEATURES
+        caps = self._caps
+        if caps is None or caps.supports_swing:
+            features |= ClimateEntityFeature.SWING_MODE
+        return features
+
+    @property
+    def hvac_modes(self) -> list[HVACMode]:
+        caps = self._caps
+        if caps is None:
+            return list(HA_TO_MA_HVAC.keys())
+        modes = [HVACMode.OFF]
+        flags = caps.hvac_modes()
+        for name, ha_mode in (
+            ("heat", HVACMode.HEAT), ("cool", HVACMode.COOL), ("auto", HVACMode.AUTO),
+            ("dry", HVACMode.DRY), ("fan_only", HVACMode.FAN_ONLY),
+        ):
+            if flags.get(name):
+                modes.append(ha_mode)
+        return modes
+
+    @property
+    def fan_modes(self) -> list[str]:
+        caps = self._caps
+        if caps is None:
+            return list(HA_TO_MA_FAN.keys())
+        return caps.fan_modes()
 
     # --- unit handling -------------------------------------------------------
     # The device is Celsius-native (0.5°C). When HA's unit system is Fahrenheit we

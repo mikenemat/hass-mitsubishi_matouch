@@ -47,6 +47,11 @@ _FAILURE_LOG_INTERVAL = 60
 # reset on any success, so a genuine wrong PIN flags in ~3 polls while flukes never do.
 _AUTH_FAIL_THRESHOLD = 3
 
+# Max attempts to auto-fetch the device-info capability blob before giving up (and
+# falling back to ungated modes). Each attempt is one IDLE-job poll; capping it stops a
+# unit that won't answer device-info from churning its link every poll.
+_MAX_CAPS_ATTEMPTS = 3
+
 
 class MACoordinator(DataUpdateCoordinator):
     """Mitsubishi MA Touch data update coordinator."""
@@ -124,6 +129,12 @@ class MACoordinator(DataUpdateCoordinator):
         # fresh-connection lifecycle as device-info, used to crack session lifecycles live.
         self._idle_sequence_steps: list | None = None
         self._idle_sequence_result: list | None = None
+        # Capability detection: auto-fetch the device-info blob ONCE per connection
+        # lifetime (lazily, after the first successful poll), so the climate entity can
+        # gate fan/swing/HVAC modes to what this unit actually supports. Capped attempts
+        # so a unit that won't answer device-info can't churn its link forever (it just
+        # falls back to ungated modes). Caps are static, cached on the Thermostat.
+        self._caps_attempts = 0
 
     @property
     def firmware_version(self) ->  str | None:
@@ -544,6 +555,17 @@ class MACoordinator(DataUpdateCoordinator):
             self._reset_backoff()
             self.clear_auth_issue()
             self.clear_wedged_issue()
+            # Lazily populate capabilities once: after a clean poll, queue a device-info
+            # fetch for the NEXT poll's IDLE job (capped, and never while another IDLE job
+            # is already queued). Once caps are cached this never runs again.
+            if (
+                self.capabilities is None
+                and self._caps_attempts < _MAX_CAPS_ATTEMPTS
+                and not self._device_info_request
+                and self._idle_sequence_steps is None
+            ):
+                self._caps_attempts += 1
+                self._device_info_request = True
             await self._record_poll(
                 True,
                 room_temperature=status.room_temperature,

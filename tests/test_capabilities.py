@@ -98,3 +98,45 @@ def test_short_blob_raises():
 
     with pytest.raises(ValueError):
         caps_mod.parse_device_info(b"\x05\x00\x00\x00\x00\x00")
+
+
+# More live blobs for cross-validation across the fleet (all CT01MAU, fetched 2026-06-30):
+#  - 2D:15: 1 indoor unit, vane=0 (NO swing), 3 fan steps (NO quiet), hold supported.
+#  - 40:87: 2 indoor units, vane=4 (swing), 4 fan steps (quiet), hold supported.
+MAU_2D15 = bytes.fromhex(
+    "050000000000002f0000039001800270018002900100039001800270010aa4000000010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+)
+MAU_4087 = bytes.fromhex(
+    "050000000000002f0000039001800270018002900100039001800270014ba4010000010000010001000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+)
+
+
+def test_ct01mau_2d15_profile_and_gating():
+    caps = caps_mod.parse_device_info(MAU_2D15)
+    assert caps.num_indoor_units == 1
+    assert caps.temp_unit == "F"
+    assert caps.hold is True            # CT01MAU supports hold (Theater/CT01MA does not)
+    assert caps.vane == 0
+    assert caps.supports_swing is False
+    assert caps.fan_steps == 3
+    # 3-step unit: NO 'quiet' offered (this is the speed-revert wart fix).
+    assert caps.fan_modes() == ["low", "medium", "high", "auto"]
+    assert caps.cool and caps.heat and caps.dry and caps.fan and caps.auto
+
+
+def test_ct01mau_4087_profile_and_gating():
+    caps = caps_mod.parse_device_info(MAU_4087)
+    assert caps.num_indoor_units == 2
+    assert caps.vane == 4
+    assert caps.supports_swing is True
+    assert caps.fan_steps == 4
+    assert caps.fan_modes() == ["quiet", "low", "medium", "high", "auto"]
+
+
+def test_theater_gating():
+    caps = caps_mod.parse_device_info(THEATER)
+    assert caps.supports_swing is True
+    assert caps.fan_modes() == ["quiet", "low", "medium", "high", "auto"]
+    # Theater (CT01MA) does NOT support hold — gating must reflect that.
+    assert caps.hold is False
+    assert caps.hvac_modes() == {"heat": True, "cool": True, "auto": True, "dry": True, "fan_only": True}
