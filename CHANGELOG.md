@@ -4,6 +4,18 @@ This is a hardened fork of [cyaneous/hass-mitsubishi_matouch](https://github.com
 focused on running several MA Touch (PAR-CT01MAU) thermostats reliably over ESP32
 Bluetooth proxies, 24/7.
 
+## 0.14.9
+
+- **Converge temperature handling on the MELRemo app as the single source of truth.**
+  The setpoint conversion previously used a separately-maintained CN105-derived table.
+  Decompiling MELRemo v4.2.2 showed it agreed with the controller everywhere **except
+  88 °F**, where the CN105 table mapped to 30.5 °C but the real remote uses **31.0 °C**
+  — so setting max temp commanded a half-degree low. Setpoint and room/current temp now
+  share one `_C_TO_F` table (and one `_F_TO_C` inverse) taken verbatim from MELRemo, so
+  they cannot drift apart again, and the old second table is gone. Net behavior change:
+  88 °F now commands 31.0 °C (was 30.5); 61–87 °F unchanged; room temp already corrected
+  in 0.14.8. °C systems unaffected (passthrough).
+
 ## 0.14.8
 
 - **Fix room temperature again — use the controller's lookup table, not truncation.**

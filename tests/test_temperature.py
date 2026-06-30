@@ -28,9 +28,19 @@ STANDARD = {
 
 
 def test_table_fidelity():
+    # C->F: every setpoint °C maps to the documented °F.
     for f, c in STANDARD.items():
-        assert t.setpoint_f_to_c(f) == c, f
         assert t.setpoint_c_to_f(c) == f, c
+    # F->C now matches MELRemo's inverse exactly (incl. the 88°F -> 31.0 convergence).
+    for f in range(61, 89):
+        assert t.setpoint_f_to_c(f) == t._F_TO_C[f], f
+
+
+def test_setpoint_88f_converged_to_melremo():
+    # The CN105-derived table mapped 88°F -> 30.5°C; the controller / MELRemo use
+    # 31.0°C. We converged on MELRemo, so max-temp now commands the right value.
+    assert t.setpoint_f_to_c(88) == 31.0
+    assert t.setpoint_c_to_f(31.0) == 88
 
 
 def test_measured_ground_truth():
@@ -48,6 +58,12 @@ def test_roundtrip_fahrenheit():
 
 def test_roundtrip_celsius():
     for c in STANDARD.values():
+        if c == 30.5:
+            # Double-step: 30.5 and 31.0 both display 88°F, and the controller resolves
+            # 88°F input to 31.0 (matches MELRemo), so 30.5 is intentionally not
+            # round-trip stable. This is the controller's real behavior, not a bug.
+            assert t.setpoint_f_to_c(t.setpoint_c_to_f(c)) == 31.0
+            continue
         assert t.setpoint_f_to_c(t.setpoint_c_to_f(c)) == c, c
 
 
@@ -80,10 +96,10 @@ def test_room_uses_controller_table():
 
 
 def test_room_table_superset_matches_setpoint_table():
-    # The full room table must equal the setpoint table everywhere they overlap
-    # (16.0–30.5 °C) — they are the SAME controller table, per MELRemo.
+    # The single C->F table must equal the documented setpoint values everywhere they
+    # overlap (16.0–30.5 °C) — setpoint and room are now ONE table, per MELRemo.
     for f, c in STANDARD.items():
-        assert t._ROOM_C_TO_F[c] == f, (c, f)
+        assert t._C_TO_F[c] == f, (c, f)
 
 
 def test_celsius_passthrough_is_identity():
@@ -113,7 +129,7 @@ def test_edges_do_not_crash():
     assert t.setpoint_c_to_f(31.0) == 88        # above table top -> plain
     assert t.setpoint_c_to_f(10.0) == 50        # below table -> plain
     assert t.setpoint_f_to_c(50) == 16.0        # below range -> clamp
-    assert t.setpoint_f_to_c(99) == 30.5        # above range -> clamp
+    assert t.setpoint_f_to_c(99) == 31.0        # above range -> clamp to 88°F = 31.0°C
     assert t.setpoint_f_to_c(72.5) == 22.5      # fractional °F -> rounds
 
 
