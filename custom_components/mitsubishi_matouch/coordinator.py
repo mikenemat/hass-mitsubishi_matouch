@@ -114,6 +114,10 @@ class MACoordinator(DataUpdateCoordinator):
         self._target_fan_mode: MAFanMode | None = None
         self._target_vane_mode: MAVaneMode | None = None
         self._target_hold: bool | None = None
+        # DEBUG/RE: device-info fetch is run INSIDE _run_poll (serialized refresh) so the
+        # multi-frame session-3 sequence can't interleave with a status poll.
+        self._device_info_request = False
+        self._device_info_result: dict[str, str] | None = None
 
     @property
     def firmware_version(self) ->  str | None:
@@ -385,6 +389,16 @@ class MACoordinator(DataUpdateCoordinator):
 
         await self._thermostat.async_ensure_connected()
         self._note_connection_source()
+
+        # DEBUG/RE: run a requested device-info fetch here (serialized inside the poll, so
+        # its begin/data/end session-3 frames can't interleave with a status request).
+        # Best-effort: never let it break the poll/status read.
+        if self._device_info_request:
+            self._device_info_request = False
+            try:
+                self._device_info_result = await self._thermostat.async_get_device_info()
+            except Exception as ex:  # noqa: BLE001
+                self._device_info_result = {"error": str(ex)}
 
         # Process pending control updates over the live connection. Clear a queued
         # value only after a successful write so failures can retry.
@@ -663,10 +677,16 @@ class MACoordinator(DataUpdateCoordinator):
         return await self._thermostat.async_send_raw_request(message_type, request_flag, payload)
 
     async def async_fetch_device_info(self) -> dict[str, str]:
-        """DEBUG / RE on-demand: fetch the device-info / capability blob via the
-        session-3 begin/data/end sequence; returns each frame's response hex."""
+        """DEBUG / RE on-demand: request a device-info fetch and run it inside the next
+        (serialized) poll so its session-3 frames don't interleave with a status request.
+        Returns each frame's response hex."""
 
-        return await self._thermostat.async_get_device_info()
+        self._device_info_request = True
+        self._device_info_result = None
+        await self.async_refresh()
+        if self._device_info_result is None:
+            return {"error": "fetch did not run (poll failed or unit unreachable)"}
+        return self._device_info_result
 
     async def async_close_connection(self) -> None:
         """Disconnect the persistent BLE connection (called on unload)."""

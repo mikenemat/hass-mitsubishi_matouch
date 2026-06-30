@@ -451,11 +451,16 @@ class Thermostat:
         unexpected acks don't raise and the raw capability bytes are returned.
         """
 
+        # Device-info is a PRE-AUTH GUEST read (the USER PIN returns BAD_PIN on session 3).
+        # GUEST credentials = user_type 0 (request_flag 0), password "AAAA" (0xAAAA),
+        # license_type 0 + license "0000" (the Const-0 unknown_1/2/3). Confirmed: the
+        # MELRemo begin-session GUEST userInfo is "AAAA"/"0000".
+        guest_pw = 0xAAAA
         out: dict[str, str] = {}
 
         try:
             begin = _MAAuthenticatedRequest(
-                message_type=_MAMessageType.BEGIN_SESSION_3, request_flag=0x01, pin=self._pin
+                message_type=_MAMessageType.BEGIN_SESSION_3, request_flag=0x00, pin=guest_pw
             )
             out["begin"] = (await self._async_write_request(begin, validate=False)).hex()
         except Exception as ex:  # noqa: BLE001
@@ -469,7 +474,7 @@ class Thermostat:
 
         try:
             end = _MAAuthenticatedRequest(
-                message_type=_MAMessageType.END_SESSION_3, request_flag=0x01, pin=self._pin
+                message_type=_MAMessageType.END_SESSION_3, request_flag=0x00, pin=guest_pw
             )
             out["end"] = (await self._async_write_request(end, validate=False)).hex()
         except Exception as ex:  # noqa: BLE001
