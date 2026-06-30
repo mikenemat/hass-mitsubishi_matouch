@@ -4,6 +4,18 @@ This is a hardened fork of [cyaneous/hass-mitsubishi_matouch](https://github.com
 focused on running several MA Touch (PAR-CT01MAU) thermostats reliably over ESP32
 Bluetooth proxies, 24/7.
 
+## 0.14.12
+
+- **RE groundwork: fetch the device-info / capability blob.** Added
+  `Thermostat.async_get_device_info()` — the `e(3) a(0,0)` get-data request
+  (message_type `0x0003` sent as GET-DATA, no PIN) that the MELRemo SDK uses to read a
+  unit's capabilities (supported fan steps, vane, louver, vent, right/left, Move-Eye,
+  hold, temp unit/step, model class). It's fetched at login (best-effort; can't break
+  the connection) and the raw response is surfaced in **Download Diagnostics**
+  (`device_info_hex`) so the 76-byte capability layout is parsed from real bytes rather
+  than guessed. No user-facing change yet; capability-based gating of controls/modes
+  follows once the response is confirmed.
+
 ## 0.14.11
 
 - **New: HOLD switch — the first MELRemo-derived control axis.** Each thermostat gets a

@@ -136,6 +136,12 @@ class MACoordinator(DataUpdateCoordinator):
         return self._thermostat.last_login_responses
 
     @property
+    def device_info_hex(self) -> str | None:
+        """Raw device-info / capability response hex (for building the parser)."""
+
+        return self._thermostat.last_device_info_hex
+
+    @property
     def reconnects(self) -> int:
         """Reconnects since startup (successful connects after the first)."""
 

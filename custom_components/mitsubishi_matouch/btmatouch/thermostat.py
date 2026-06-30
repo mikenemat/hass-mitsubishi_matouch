@@ -116,6 +116,9 @@ class Thermostat:
         # 0x0401 operation-begin), captured to reverse the device-info / capability
         # layout. These are device->phone responses (no PIN). Empty until a login runs.
         self._login_responses: dict[str, str] = {}
+        # Raw hex of the device-info / capability response (see async_get_device_info),
+        # captured so the 76-byte capability layout is parsed from real bytes.
+        self._last_device_info_hex: str | None = None
 
     @property
     def is_connected(self) -> bool:
@@ -195,6 +198,13 @@ class Thermostat:
         device-info / capability layout). Empty until a login completes."""
 
         return dict(self._login_responses)
+
+    @property
+    def last_device_info_hex(self) -> str | None:
+        """Raw hex of the device-info / capability response (or an 'error: ...' string).
+        None until the first login. Used to build/validate the capability parser."""
+
+        return self._last_device_info_hex
 
     async def async_connect(self) -> None:
         """Connect to the thermostat.
@@ -359,6 +369,14 @@ class Thermostat:
         request = _MAAuthenticatedRequest(message_type=_MAMessageType.UNKNOWN_2, request_flag=0x01, pin=pin)
         self._login_responses["0x0401"] = (await self._async_write_request(request)).hex()
 
+        # Fetch the device-info / capability blob (best-effort; MUST NOT break login).
+        # Per the SDK (c0.d -> e(3) a(0,0) get-data) this is message_type 0x0003 sent as
+        # a GET-DATA (request_flag 0x00, no PIN), distinct from the auth 0x0003 above.
+        try:
+            self._last_device_info_hex = (await self.async_get_device_info()).hex()
+        except Exception as ex:  # noqa: BLE001 - device-info is non-critical
+            self._last_device_info_hex = f"error: {ex}"
+
     async def async_logout(self, pin: int) -> None:
         """Unknown messages at end of connection.
 
@@ -405,6 +423,20 @@ class Thermostat:
         _LOGGER.debug("[%s] Status IN: %s", self._mac_address, vars(response))
         #_LOGGER.debug("[%s] Status OUT: %s", self._mac_address, vars(status))
         return status
+
+    async def async_get_device_info(self) -> bytes:
+        """Fetch the device-info / capability blob and return the raw response.
+
+        Per the MELRemo SDK (controller/c0.d issues e(3) a(0,0) as a get-data and parses
+        the reply as model/m0/i/a), this is message_type 0x0003 sent as GET-DATA
+        (request_flag 0x00, no PIN) — distinct from the auth-carrying 0x0003 in
+        async_login. The response body carries per-unit capabilities (supported fan
+        steps, vane, louver, vent, right/left, move-eye, hold, temp unit/step, model
+        class). The byte layout is parsed once confirmed against a real capture.
+        """
+
+        request = _MAStatusRequest(message_type=_MAMessageType.UNKNOWN_1, request_flag=0x00)
+        return await self._async_write_request(request)
 
     async def async_set_cool_setpoint(self, temperature: float) -> None:
         """Set the heating setpoint temperature.
