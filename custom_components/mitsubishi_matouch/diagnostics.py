@@ -47,6 +47,9 @@ async def async_get_config_entry_diagnostics(
                 "active_rssi": coordinator.active_rssi,
                 "login_responses": coordinator.login_responses,
                 "device_info_hex": coordinator.device_info_hex,
+                "capabilities": (
+                    coordinator.capabilities.as_dict() if coordinator.capabilities else None
+                ),
                 "recent_telemetry": telemetry.recent(coordinator.mac_address) if telemetry else [],
             }
         )

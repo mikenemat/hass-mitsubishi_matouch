@@ -10,7 +10,7 @@ from homeassistant.components.climate import (
     HVACAction,
     HVACMode,
 )
-from homeassistant.components.climate.const import SWING_ON, SWING_OFF
+from homeassistant.components.climate.const import SWING_ON, SWING_OFF, PRESET_NONE
 from homeassistant.const import ATTR_TEMPERATURE, PRECISION_HALVES, PRECISION_WHOLE, UnitOfTemperature
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ServiceValidationError
@@ -33,9 +33,23 @@ from .const import (
     HA_TO_MA_HVAC,
     MA_TO_HA_FAN,
     HA_TO_MA_FAN,
+    MA_VANE_VALUE_TO_HA,
+    HA_TO_MA_VANE,
+    PRESET_HOLD,
     SIGNAL_NEW_THERMOSTAT,
     SUBENTRY_TYPE_THERMOSTAT,
 )
+
+
+def _model_id_for(sw_version: str | None) -> str:
+    """Per-unit technical model id from the software-version string (e.g.
+    'CT01MA_07.02' -> PAR-CT01MA, 'CT01MAU_01.61' -> PAR-CT01MAU). Check the longer
+    'CT01MAU' token first since 'CT01MA' is a substring of it."""
+    if sw_version and "CT01MAU" in sw_version:
+        return "PAR-CT01MAU"
+    if sw_version and "CT01MA" in sw_version:
+        return "PAR-CT01MA"
+    return DEVICE_MODEL_ID
 
 
 async def async_setup_entry(
@@ -78,7 +92,6 @@ class MAClimate(CoordinatorEntity[MACoordinator], ClimateEntity):
         | ClimateEntityFeature.TURN_ON
         | ClimateEntityFeature.TURN_OFF
     )
-    _attr_swing_modes = [SWING_ON, SWING_OFF]
 
     def __init__(self, coordinator: MACoordinator) -> None:
         """Initialize the MA Touch climate entity."""
@@ -91,7 +104,7 @@ class MAClimate(CoordinatorEntity[MACoordinator], ClimateEntity):
             name=coordinator.device_name,
             manufacturer=MANUFACTURER,
             model=DEVICE_MODEL,
-            model_id=DEVICE_MODEL_ID,
+            model_id=_model_id_for(coordinator.software_version),
             sw_version=coordinator.software_version,
             hw_version=coordinator.firmware_version,
         )
@@ -126,8 +139,13 @@ class MAClimate(CoordinatorEntity[MACoordinator], ClimateEntity):
         device = registry.async_get_device(
             connections={(CONNECTION_BLUETOOTH, format_mac(self.coordinator.mac_address))}
         )
-        if device is not None and (device.sw_version != sw or device.hw_version != hw):
-            registry.async_update_device(device.id, sw_version=sw, hw_version=hw)
+        if device is None:
+            return
+        # Correct the technical model id per unit (Theater is a CT01MA, the rest are
+        # CT01MAU) once the software version is known.
+        mid = _model_id_for(sw)
+        if device.sw_version != sw or device.hw_version != hw or device.model_id != mid:
+            registry.async_update_device(device.id, sw_version=sw, hw_version=hw, model_id=mid)
 
     @property
     def available(self) -> bool:
@@ -166,9 +184,23 @@ class MAClimate(CoordinatorEntity[MACoordinator], ClimateEntity):
     def supported_features(self) -> ClimateEntityFeature:
         features = self._BASE_FEATURES
         caps = self._caps
+        # SWING_MODE while caps are unknown (don't hide prematurely) or when the unit
+        # has a vane. PRESET_MODE only once we KNOW the unit supports hold (so a unit
+        # that can't hold — e.g. Theater — never shows a hold preset that would revert).
         if caps is None or caps.supports_swing:
             features |= ClimateEntityFeature.SWING_MODE
+        if caps is not None and caps.hold:
+            features |= ClimateEntityFeature.PRESET_MODE
         return features
+
+    @property
+    def swing_modes(self) -> list[str]:
+        """Vane positions this unit supports (auto / 1..5 / swing) once caps are known;
+        the plain on/off pair until then."""
+        caps = self._caps
+        if caps is not None and caps.supports_swing:
+            return caps.vane_modes()
+        return [SWING_ON, SWING_OFF]
 
     @property
     def hvac_modes(self) -> list[HVACMode]:
@@ -319,7 +351,27 @@ class MAClimate(CoordinatorEntity[MACoordinator], ClimateEntity):
         status = self._status
         if status is None:
             return None
+        caps = self._caps
+        if caps is not None and caps.supports_swing:
+            # Map by wire value (MAVaneMode.NONE/STEP_5 both == 0, so an enum lookup of
+            # 0 would mis-resolve to NONE).
+            return MA_VANE_VALUE_TO_HA.get(int(status.vane_mode))
         return SWING_ON if status.vane_mode is MAVaneMode.SWING else SWING_OFF
+
+    @property
+    def preset_modes(self) -> list[str] | None:
+        caps = self._caps
+        if caps is not None and caps.hold:
+            return [PRESET_NONE, PRESET_HOLD]
+        return None
+
+    @property
+    def preset_mode(self) -> str | None:
+        status = self._status
+        caps = self._caps
+        if status is None or caps is None or not caps.hold:
+            return None
+        return PRESET_HOLD if getattr(status, "hold", False) else PRESET_NONE
 
     @property
     def hvac_action(self) -> HVACAction | None:
@@ -394,10 +446,25 @@ class MAClimate(CoordinatorEntity[MACoordinator], ClimateEntity):
             raise ServiceValidationError(f"Failed to set fan mode: {ex}") from ex
 
     async def async_set_swing_mode(self, swing_mode: str) -> None:
-        """Set new target swing operation."""
+        """Set the vane position / swing. Accepts a vane string (auto/1..5/swing) when
+        caps are known, or the plain on/off pair otherwise."""
 
         try:
-            vane_mode = MAVaneMode.SWING if swing_mode == SWING_ON else MAVaneMode.AUTO
+            if swing_mode in HA_TO_MA_VANE:
+                vane_mode = HA_TO_MA_VANE[swing_mode]
+            elif swing_mode == SWING_ON:
+                vane_mode = MAVaneMode.SWING
+            else:
+                vane_mode = MAVaneMode.AUTO
             await self.coordinator.async_set_vane_mode(vane_mode)
         except MAException as ex:
             raise ServiceValidationError(f"Failed to set swing mode: {ex}") from ex
+
+    async def async_set_preset_mode(self, preset_mode: str) -> None:
+        """Set HOLD (keep the current setpoint / suspend the schedule). Only offered on
+        units whose capability blob advertises hold support."""
+
+        try:
+            await self.coordinator.async_set_hold(preset_mode == PRESET_HOLD)
+        except MAException as ex:
+            raise ServiceValidationError(f"Failed to set preset: {ex}") from ex

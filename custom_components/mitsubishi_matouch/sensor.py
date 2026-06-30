@@ -43,6 +43,60 @@ class MASensorDescription(SensorEntityDescription):
     """Describes an MA Touch diagnostic sensor."""
 
     value_fn: Callable[[MACoordinator], float | int | str | None]
+    # Optional extra attributes (e.g. the full capability detail / per-head info).
+    attrs_fn: Callable[[MACoordinator], dict | None] | None = None
+
+
+def _caps(c: MACoordinator):
+    return c.capabilities
+
+
+# Capability sensors (DIAGNOSTIC). All read coordinator.capabilities, which is None
+# until the device-info blob is fetched (lazily, shortly after the first poll), so each
+# returns None until then. The "Indoor units" sensor also carries the FULL capability
+# detail (every supported axis + per-head info) in its attributes, so nothing is hidden.
+CAP_SENSORS: tuple[MASensorDescription, ...] = (
+    MASensorDescription(
+        key="indoor_units",
+        name="Indoor units",
+        icon="mdi:hvac",
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda c: _caps(c).num_indoor_units if _caps(c) else None,
+        attrs_fn=lambda c: _caps(c).as_dict() if _caps(c) else None,
+    ),
+    MASensorDescription(
+        key="connection_type",
+        name="Connection type",
+        icon="mdi:hvac",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda c: _caps(c).connect_unit if _caps(c) else None,
+    ),
+    MASensorDescription(
+        key="fan_steps",
+        name="Fan steps",
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda c: _caps(c).fan_steps if _caps(c) else None,
+    ),
+    MASensorDescription(
+        key="vane_positions",
+        name="Vane positions",
+        icon="mdi:arrow-oscillating",
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda c: (
+            sum(1 for m in _caps(c).vane_modes() if m.isdigit()) if _caps(c) else None
+        ),
+    ),
+    MASensorDescription(
+        key="display_unit",
+        name="Display unit",
+        icon="mdi:temperature-celsius",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda c: _caps(c).temp_unit if _caps(c) else None,
+    ),
+)
 
 
 SENSORS: tuple[MASensorDescription, ...] = (
@@ -109,7 +163,7 @@ async def async_setup_entry(
         if coordinator is None:
             return
         async_add_entities(
-            [MASensor(coordinator, description) for description in SENSORS],
+            [MASensor(coordinator, description) for description in (*SENSORS, *CAP_SENSORS)],
             config_subentry_id=subentry_id,
         )
 
@@ -148,6 +202,14 @@ class MASensor(CoordinatorEntity[MACoordinator], SensorEntity):
         """Return the current telemetry value."""
 
         return self.entity_description.value_fn(self.coordinator)
+
+    @property
+    def extra_state_attributes(self) -> dict | None:
+        """Optional extra detail (e.g. the full capability breakdown + per-head info)."""
+
+        if self.entity_description.attrs_fn is None:
+            return None
+        return self.entity_description.attrs_fn(self.coordinator)
 
     @property
     def available(self) -> bool:

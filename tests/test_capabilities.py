@@ -140,3 +140,12 @@ def test_theater_gating():
     # Theater (CT01MA) does NOT support hold — gating must reflect that.
     assert caps.hold is False
     assert caps.hvac_modes() == {"heat": True, "cool": True, "auto": True, "dry": True, "fan_only": True}
+
+
+def test_vane_modes():
+    # vane=4 -> 5 discrete positions plus auto + swing.
+    full = ["auto", "1", "2", "3", "4", "5", "swing"]
+    assert caps_mod.parse_device_info(THEATER).vane_modes() == full
+    assert caps_mod.parse_device_info(MAU_4087).vane_modes() == full
+    # vane=0 -> no vane control at all.
+    assert caps_mod.parse_device_info(MAU_2D15).vane_modes() == []

@@ -187,6 +187,18 @@ class Capabilities:
             "dry": self.dry, "fan_only": self.fan,
         }
 
+    def vane_modes(self) -> list[str]:
+        """HA swing-mode strings for this unit's vane, or [] if it has no vane.
+
+        Positions scale with the vane capability the same way fan steps do
+        (vane 1 -> 2 positions ... vane 4 -> 5 positions), plus 'auto' and 'swing'.
+        Strings match const.MA_VANE_VALUE_TO_HA / HA_TO_MA_VANE ('auto','1'..'5','swing').
+        """
+        if self.vane <= 0:
+            return []
+        positions = min(self.vane + 1, 5)
+        return ["auto"] + [str(i) for i in range(1, positions + 1)] + ["swing"]
+
     def as_dict(self) -> dict:
         """Flat, JSON-friendly view (for diagnostics / the fetch service)."""
         return {

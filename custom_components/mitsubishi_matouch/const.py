@@ -9,7 +9,7 @@ from homeassistant.components.climate.const import (
     FAN_OFF,
 )
 
-from .btmatouch.const import MAOperationMode, MAFanMode
+from .btmatouch.const import MAOperationMode, MAFanMode, MAVaneMode
 
 DOMAIN = "mitsubishi_matouch"
 
@@ -57,6 +57,39 @@ HA_TO_MA_FAN: dict[str, MAFanMode] = {
     FAN_LOW: MAFanMode.LOW,
     "quiet": MAFanMode.QUIET,
 }
+
+# --- Vane (vertical airflow) <-> HA swing-mode strings -------------------------
+# The vane has up to 5 discrete positions plus auto + swing, surfaced via the climate
+# swing control (gated by the per-unit vane capability). HA swing-mode strings are free
+# text, so we use "auto"/"1".."5"/"swing".
+#
+# READ is mapped by the WIRE VALUE (not the MAVaneMode member) because MAVaneMode.NONE
+# and STEP_5 both equal 0 — an enum lookup of 0 yields NONE, so a value table avoids
+# that alias. SET maps the HA string to the right MAVaneMode member.
+VANE_AUTO = "auto"
+VANE_SWING = "swing"
+MA_VANE_VALUE_TO_HA: dict[int, str] = {
+    int(MAVaneMode.AUTO): VANE_AUTO,     # 6
+    int(MAVaneMode.STEP_1): "1",         # 3
+    int(MAVaneMode.STEP_2): "2",         # 5
+    int(MAVaneMode.STEP_3): "3",         # 2
+    int(MAVaneMode.STEP_4): "4",         # 1
+    int(MAVaneMode.STEP_5): "5",         # 0
+    int(MAVaneMode.SWING): VANE_SWING,   # 7
+}
+HA_TO_MA_VANE: dict[str, MAVaneMode] = {
+    VANE_AUTO: MAVaneMode.AUTO,
+    "1": MAVaneMode.STEP_1,
+    "2": MAVaneMode.STEP_2,
+    "3": MAVaneMode.STEP_3,
+    "4": MAVaneMode.STEP_4,
+    "5": MAVaneMode.STEP_5,
+    VANE_SWING: MAVaneMode.SWING,
+}
+
+# HOLD is surfaced as a climate preset (only on units whose capability blob advertises
+# holdfunc). PRESET_NONE is HA's "no preset".
+PRESET_HOLD = "hold"
 
 DEFAULT_SCAN_INTERVAL = 10 # seconds; cheap now that the connection is persistent (keepalive holds it)
 
