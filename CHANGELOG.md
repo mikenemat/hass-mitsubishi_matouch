@@ -4,6 +4,14 @@ This is a hardened fork of [cyaneous/hass-mitsubishi_matouch](https://github.com
 focused on running several MA Touch (PAR-CT01MAU) thermostats reliably over ESP32
 Bluetooth proxies, 24/7.
 
+## 0.14.14
+
+- **Remove the HOLD switch.** Hardware validation (Theater) showed it's a no-op on these
+  ducted units — the command is ACKed but changes nothing — so it was a dead control.
+  Removed the switch platform. The control-frame protocol layer (louver/vent/left-right/
+  Move-Eye/hold encoders + tests) stays dormant in the library for units that actually
+  support those axes, to be exposed later only behind capability detection.
+
 ## 0.14.13
 
 - **HOTFIX: revert the v0.14.12 device-info fetch — it took all units offline.** Calling

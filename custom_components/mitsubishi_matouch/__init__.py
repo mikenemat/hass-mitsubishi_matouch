@@ -41,7 +41,6 @@ _LOGGER = logging.getLogger(__name__)
 PLATFORMS = [
     Platform.CLIMATE,
     Platform.SENSOR,
-    Platform.SWITCH,
 ]
 
 SERVICE_GET_TELEMETRY = "get_telemetry"
