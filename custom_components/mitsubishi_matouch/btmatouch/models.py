@@ -44,15 +44,17 @@ class _BaseModel[StructType: _MAStruct](ABC):
 class Status(_BaseModel[_MAStatusResponse]):
     """Status model."""
 
-    max_cool_temperature: float
-    min_cool_temperature: float
-    max_heat_temperature: float
-    min_heat_temperature: float
-    max_auto_temperature: float
-    min_auto_temperature: float
-    cool_setpoint: float
-    heat_setpoint: float
-    room_temperature: float
+    # Temperatures may be None: the device sends 0xFFFF ("not set") for setpoints/limits
+    # a given unit or mode doesn't use (see _MATemperature.decode). Consumers must guard.
+    max_cool_temperature: float | None
+    min_cool_temperature: float | None
+    max_heat_temperature: float | None
+    min_heat_temperature: float | None
+    max_auto_temperature: float | None
+    min_auto_temperature: float | None
+    cool_setpoint: float | None
+    heat_setpoint: float | None
+    room_temperature: float | None
     fan_mode: MAFanMode
     vane_mode: MAVaneMode
     hold: bool

@@ -175,9 +175,10 @@ class MAClimate(CoordinatorEntity[MACoordinator], ClimateEntity):
         # Whole °F (matches the controller's °F mode) / 0.5 °C natively.
         return PRECISION_WHOLE if self._fahrenheit else PRECISION_HALVES
 
-    def _disp_setpoint(self, celsius: float) -> float:
-        """Celsius setpoint -> displayed unit (Mitsubishi table when °F)."""
-        return to_display_setpoint(celsius, self._fahrenheit)
+    def _disp_setpoint(self, celsius: float | None) -> float | None:
+        """Celsius setpoint -> displayed unit (Mitsubishi table when °F). None-safe:
+        a device 'not set' (0xFFFF) setpoint decodes to None and stays None."""
+        return to_display_setpoint(celsius, self._fahrenheit) if celsius is not None else None
 
     def _disp_room(self, celsius: float) -> float:
         """Celsius room temp -> displayed unit (plain rounding when °F)."""
@@ -201,7 +202,9 @@ class MAClimate(CoordinatorEntity[MACoordinator], ClimateEntity):
     @property
     def current_temperature(self) -> float | None:
         status = self._status
-        return self._disp_room(status.room_temperature) if status else None
+        if status is None or status.room_temperature is None:
+            return None
+        return self._disp_room(status.room_temperature)
 
     @property
     def target_temperature(self) -> float | None:
@@ -244,6 +247,8 @@ class MAClimate(CoordinatorEntity[MACoordinator], ClimateEntity):
                 celsius = status.min_auto_temperature
             case _:
                 celsius = MA_MIN_TEMP
+        if celsius is None:  # device sent 0xFFFF for this bound; fall back to default
+            celsius = MA_MIN_TEMP
         return self._disp_setpoint(celsius)
 
     @property
@@ -260,6 +265,8 @@ class MAClimate(CoordinatorEntity[MACoordinator], ClimateEntity):
                 celsius = status.max_auto_temperature
             case _:
                 celsius = MA_MAX_TEMP
+        if celsius is None:  # device sent 0xFFFF for this bound; fall back to default
+            celsius = MA_MAX_TEMP
         return self._disp_setpoint(celsius)
 
     @property
@@ -281,19 +288,25 @@ class MAClimate(CoordinatorEntity[MACoordinator], ClimateEntity):
             return None
         if status.operation_mode is MAOperationMode.OFF:
             return HVACAction.OFF
+        # Any of these can be None if the device reported 0xFFFF ("not set"); treat a
+        # missing comparison input as "can't tell" (IDLE) rather than crashing.
+        room = status.room_temperature
+        if room is None:
+            return None
+        heat, cool = status.heat_setpoint, status.cool_setpoint
         match status.operation_mode:
             case MAOperationMode.AUTO:
-                if status.room_temperature <= status.heat_setpoint:
+                if heat is not None and room <= heat:
                     return HVACAction.HEATING
-                if status.room_temperature >= status.cool_setpoint:
+                if cool is not None and room >= cool:
                     return HVACAction.COOLING
                 return HVACAction.IDLE
             case MAOperationMode.HEAT:
-                return HVACAction.HEATING if status.room_temperature <= status.heat_setpoint else HVACAction.IDLE
+                return HVACAction.HEATING if heat is not None and room <= heat else HVACAction.IDLE
             case MAOperationMode.COOL:
-                return HVACAction.COOLING if status.room_temperature >= status.cool_setpoint else HVACAction.IDLE
+                return HVACAction.COOLING if cool is not None and room >= cool else HVACAction.IDLE
             case MAOperationMode.DRY:
-                return HVACAction.DRYING if status.room_temperature >= status.cool_setpoint else HVACAction.IDLE
+                return HVACAction.DRYING if cool is not None and room >= cool else HVACAction.IDLE
             case _:
                 return HVACAction.IDLE
 
