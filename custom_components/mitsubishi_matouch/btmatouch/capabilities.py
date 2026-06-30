@@ -24,7 +24,20 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-__all__ = ["Capabilities", "IndoorUnit", "parse_device_info", "parse_capability_blob"]
+__all__ = [
+    "Capabilities", "IndoorUnit", "parse_device_info", "parse_capability_blob",
+    "VANE_AUTO", "VANE_SWING", "VANE_POSITION_LABELS",
+]
+
+# Vane (vertical airflow) HA swing-mode labels. AUTHORITATIVE from the decompiled
+# MELRemo SDK (GeminiMobileData.Vane + WindDirection.toRequestValue/convertDirectionToVane):
+# the five fixed positions are FLAT (horizontal) -> DOWNWARD20 -> DOWNWARD60 ->
+# DOWNWARD80 -> DOWNWARD100 (fully down). Human-readable so the swing dropdown shows
+# airflow direction, not opaque indexes. The wire-value <-> label mapping lives in
+# const.MA_VANE_VALUE_TO_HA / HA_TO_MA_VANE; this list is positions 1..5 in order.
+VANE_AUTO = "auto"
+VANE_SWING = "swing"
+VANE_POSITION_LABELS = ["horizontal", "down 20%", "down 60%", "down 80%", "down 100%"]
 
 # Response header length before the m0/i/a structure (phase 1 + L3 major/sub echo 2 +
 # result 2 + 1). Validated against the live CT01MA device-info response.
@@ -192,12 +205,13 @@ class Capabilities:
 
         Positions scale with the vane capability the same way fan steps do
         (vane 1 -> 2 positions ... vane 4 -> 5 positions), plus 'auto' and 'swing'.
-        Strings match const.MA_VANE_VALUE_TO_HA / HA_TO_MA_VANE ('auto','1'..'5','swing').
+        Labels match const.MA_VANE_VALUE_TO_HA / HA_TO_MA_VANE (auto / horizontal /
+        down 20% / down 60% / down 80% / down 100% / swing).
         """
         if self.vane <= 0:
             return []
-        positions = min(self.vane + 1, 5)
-        return ["auto"] + [str(i) for i in range(1, positions + 1)] + ["swing"]
+        positions = min(self.vane + 1, len(VANE_POSITION_LABELS))
+        return [VANE_AUTO] + VANE_POSITION_LABELS[:positions] + [VANE_SWING]
 
     def as_dict(self) -> dict:
         """Flat, JSON-friendly view (for diagnostics / the fetch service)."""

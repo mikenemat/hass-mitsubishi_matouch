@@ -10,6 +10,7 @@ from homeassistant.components.climate.const import (
 )
 
 from .btmatouch.const import MAOperationMode, MAFanMode, MAVaneMode
+from .btmatouch.capabilities import VANE_AUTO, VANE_SWING, VANE_POSITION_LABELS
 
 DOMAIN = "mitsubishi_matouch"
 
@@ -58,32 +59,33 @@ HA_TO_MA_FAN: dict[str, MAFanMode] = {
     "quiet": MAFanMode.QUIET,
 }
 
-# --- Vane (vertical airflow) <-> HA swing-mode strings -------------------------
-# The vane has up to 5 discrete positions plus auto + swing, surfaced via the climate
-# swing control (gated by the per-unit vane capability). HA swing-mode strings are free
-# text, so we use "auto"/"1".."5"/"swing".
+# --- Vane (vertical airflow) <-> HA swing-mode labels --------------------------
+# The vane has up to 5 fixed positions plus auto + swing, surfaced via the climate swing
+# control (gated by the per-unit vane capability). Labels are the human-readable airflow
+# directions (capabilities.VANE_POSITION_LABELS), AUTHORITATIVE from the decompiled SDK:
+# wire 3 = FLAT (horizontal), 5 = DOWNWARD20, 2 = DOWNWARD60, 1 = DOWNWARD80,
+# 0 = DOWNWARD100 (fully down). (GeminiMobileData WindDirection.toRequestValue /
+# convertDirectionToVane.)
 #
 # READ is mapped by the WIRE VALUE (not the MAVaneMode member) because MAVaneMode.NONE
 # and STEP_5 both equal 0 — an enum lookup of 0 yields NONE, so a value table avoids
-# that alias. SET maps the HA string to the right MAVaneMode member.
-VANE_AUTO = "auto"
-VANE_SWING = "swing"
+# that alias. SET maps the HA label to the right MAVaneMode member.
 MA_VANE_VALUE_TO_HA: dict[int, str] = {
-    int(MAVaneMode.AUTO): VANE_AUTO,     # 6
-    int(MAVaneMode.STEP_1): "1",         # 3
-    int(MAVaneMode.STEP_2): "2",         # 5
-    int(MAVaneMode.STEP_3): "3",         # 2
-    int(MAVaneMode.STEP_4): "4",         # 1
-    int(MAVaneMode.STEP_5): "5",         # 0
-    int(MAVaneMode.SWING): VANE_SWING,   # 7
+    int(MAVaneMode.AUTO): VANE_AUTO,                 # 6
+    int(MAVaneMode.STEP_1): VANE_POSITION_LABELS[0], # 3 -> horizontal
+    int(MAVaneMode.STEP_2): VANE_POSITION_LABELS[1], # 5 -> down 20%
+    int(MAVaneMode.STEP_3): VANE_POSITION_LABELS[2], # 2 -> down 60%
+    int(MAVaneMode.STEP_4): VANE_POSITION_LABELS[3], # 1 -> down 80%
+    int(MAVaneMode.STEP_5): VANE_POSITION_LABELS[4], # 0 -> down 100%
+    int(MAVaneMode.SWING): VANE_SWING,               # 7
 }
 HA_TO_MA_VANE: dict[str, MAVaneMode] = {
     VANE_AUTO: MAVaneMode.AUTO,
-    "1": MAVaneMode.STEP_1,
-    "2": MAVaneMode.STEP_2,
-    "3": MAVaneMode.STEP_3,
-    "4": MAVaneMode.STEP_4,
-    "5": MAVaneMode.STEP_5,
+    VANE_POSITION_LABELS[0]: MAVaneMode.STEP_1,
+    VANE_POSITION_LABELS[1]: MAVaneMode.STEP_2,
+    VANE_POSITION_LABELS[2]: MAVaneMode.STEP_3,
+    VANE_POSITION_LABELS[3]: MAVaneMode.STEP_4,
+    VANE_POSITION_LABELS[4]: MAVaneMode.STEP_5,
     VANE_SWING: MAVaneMode.SWING,
 }
 

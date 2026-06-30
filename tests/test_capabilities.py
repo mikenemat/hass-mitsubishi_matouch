@@ -143,8 +143,8 @@ def test_theater_gating():
 
 
 def test_vane_modes():
-    # vane=4 -> 5 discrete positions plus auto + swing.
-    full = ["auto", "1", "2", "3", "4", "5", "swing"]
+    # vane=4 -> 5 fixed positions (human-readable airflow direction) plus auto + swing.
+    full = ["auto", "horizontal", "down 20%", "down 60%", "down 80%", "down 100%", "swing"]
     assert caps_mod.parse_device_info(THEATER).vane_modes() == full
     assert caps_mod.parse_device_info(MAU_4087).vane_modes() == full
     # vane=0 -> no vane control at all.
