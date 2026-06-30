@@ -4,6 +4,22 @@ This is a hardened fork of [cyaneous/hass-mitsubishi_matouch](https://github.com
 focused on running several MA Touch (PAR-CT01MAU) thermostats reliably over ESP32
 Bluetooth proxies, 24/7.
 
+## 0.14.7
+
+- **Fix room (current) temperature reading ~1°F high.** `current_temperature` was
+  converted from the device's native °C with a round-**half-up** linear formula
+  (`int(c*9/5+32+0.5)`), but the physical controller **truncates** the conversion (it
+  drops the fraction; it does not round to nearest). In the common comfort band
+  (~70-73°F) that made the HA card read **1°F above the wall display** — e.g. a sensor
+  at 22.5°C (=72.5°F) showed **73** on the card but **72** on the thermostat, while
+  23.0°C matched at 73. This was a *separate* path from the v0.13.3 setpoint fix
+  (setpoints already used the Mitsubishi table and were correct). Room temp now
+  truncates to match the controller exactly — **verified live against every unit**
+  (decoded 0.5°C sensor value vs the physical wall display: 21.0→69, 22.0→71,
+  22.5→72, 23.0→73). **°C systems stay exact:** the fix lives only in the °F branch;
+  °C mode passes the device's native 0.5°C reading straight through — no conversion, so
+  no rounding rule that could diverge from the controller.
+
 ## 0.14.6
 
 - **Repairs notice for a wedged thermostat ("reachable but won't connect").** A unit

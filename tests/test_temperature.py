@@ -57,9 +57,15 @@ def test_double_steps():
     assert t.setpoint_f_to_c(69) - t.setpoint_f_to_c(68) == 1.0
 
 
-def test_room_is_plain_halfup_not_table():
-    assert t.room_c_to_f(22.0) == 72.0
-    assert t.room_c_to_f(22.5) == 73.0  # plain half-up, NOT the table's 72
+def test_room_truncates_to_match_controller():
+    # The controller TRUNCATES the linear conversion (drops the fraction) for room
+    # temp — verified live against this site's units (wall display vs decoded 0.5°C
+    # sensor value). NOT round-to-nearest, NOT half-up, NOT the setpoint table.
+    assert t.room_c_to_f(21.0) == 69.0  # 69.8 -> 69
+    assert t.room_c_to_f(22.0) == 71.0  # 71.6 -> 71 (round-to-nearest would give 72)
+    assert t.room_c_to_f(22.5) == 72.0  # 72.5 -> 72 (half-up would give 73)
+    assert t.room_c_to_f(23.0) == 73.0  # 73.4 -> 73 (matches; no offset at this value)
+    assert t.room_c_to_f(20.0) == 68.0  # exact 68.0 (no float-undershoot truncation)
 
 
 def test_celsius_passthrough_is_identity():
@@ -70,10 +76,19 @@ def test_celsius_passthrough_is_identity():
         assert t.from_display_setpoint(c, False) == c
 
 
+def test_room_celsius_is_exact_passthrough():
+    # °C mode needs NO conversion (unlike °F): the device is Celsius-native and reports
+    # room temp at the controller's own 0.5°C display resolution, so relaying it
+    # verbatim matches the controller exactly — there is no rounding rule to get wrong.
+    # Locks that the °F truncation fix did not leak any transform into the °C path.
+    for c in (20.0, 20.5, 21.0, 21.5, 22.0, 22.5, 23.0, 23.5):
+        assert t.to_display_room(c, False) == c
+
+
 def test_fahrenheit_wrappers():
     assert t.to_display_setpoint(22.5, True) == 72
     assert t.from_display_setpoint(72, True) == 22.5
-    assert t.to_display_room(22.5, True) == 73.0
+    assert t.to_display_room(22.5, True) == 72.0  # truncated to match the controller
 
 
 def test_edges_do_not_crash():

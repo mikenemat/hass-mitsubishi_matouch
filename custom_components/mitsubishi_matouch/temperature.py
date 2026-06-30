@@ -9,8 +9,9 @@ issue #4).
 
 To match the controller exactly, the climate entity presents Fahrenheit natively
 (when HA's unit system is °F) using Mitsubishi's own table, so HA performs no
-conversion. Setpoints use the discrete table; room/current temperature uses ordinary
-rounding (the controller treats them differently).
+conversion. Setpoints use the discrete table; room/current temperature is TRUNCATED
+(the controller drops the fraction rather than rounding — verified live, see
+room_c_to_f). The two are treated differently.
 
 Table = Mitsubishi "standard" firmware variant, verified against this site's units
 (71°F→22.0°C, 72°F→22.5°C). The double-steps at 67→68→69°F (each jumps a full 1.0°C)
@@ -61,15 +62,26 @@ def setpoint_f_to_c(fahrenheit: float) -> float:
 
 
 def room_c_to_f(celsius: float) -> float:
-    """Convert a room/current temperature to °F (ordinary half-up rounding, NOT the
-    setpoint table). Room temp may therefore differ by 1°F from an equal setpoint —
-    that's expected; the controller renders the sensor reading the same way.
+    """Convert a room/current temperature to the whole °F the controller displays.
 
-    Half-up (not Python's banker's round) so 72.5°F -> 73, predictably; room temps
-    are always positive so floor(x + 0.5) is correct.
+    The controller TRUNCATES the linear conversion (it drops the fraction; it does
+    NOT round to nearest, and NOT half-up). Verified live against this site's units
+    (decoded 0.5°C sensor value vs the physical wall display):
+        22.0°C = 71.6°F -> shows 71   (round-to-nearest would wrongly give 72)
+        22.5°C = 72.5°F -> shows 72   (half-up would wrongly give 73)
+        21.0°C = 69.8°F -> shows 69
+        23.0°C = 73.4°F -> shows 73   (no offset here; matches either way)
+    An earlier version added +0.5 (round half-up), which read 1°F HIGH across most of
+    the comfort band (~70-73°F) while matching only near the .4 boundary — exactly the
+    "card reads a degree hotter than the thermostat" discrepancy. Room temp is reported
+    at 0.5°C resolution, so truncation matches the wall display at every value.
+
+    int() truncates toward zero; room temps are positive, so that is floor(). The tiny
+    epsilon guards a float result that lands just under a whole °F (e.g. 67.9999999 for
+    a true 68.0) from truncating a degree too low.
     """
 
-    return float(int(celsius * 9 / 5 + 32 + 0.5))
+    return float(int(celsius * 9 / 5 + 32 + 1e-9))
 
 
 # --- unit-aware wrappers (interoperable: °C systems get an exact passthrough) ---
@@ -86,7 +98,15 @@ def to_display_setpoint(celsius: float, fahrenheit: bool) -> float:
 
 
 def to_display_room(celsius: float, fahrenheit: bool) -> float:
-    """Room/current temp -> display unit (plain-rounded °F, or °C passthrough)."""
+    """Room/current temp -> display unit.
+
+    °F: truncated to match the controller (see room_c_to_f). °C: EXACT passthrough.
+    The device is Celsius-native and reports room temp at the controller's own display
+    resolution (0.5°C, observed live), so relaying the value verbatim makes HA match
+    the controller with NO conversion — hence no rounding rule that could disagree.
+    (The °F discrepancy only arose because °F needs a °C->°F conversion; °C does not,
+    so imposing any rounding here would be guessing and could create a 0.5°C gap.)
+    """
 
     return room_c_to_f(celsius) if fahrenheit else celsius
 
