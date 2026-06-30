@@ -4,6 +4,18 @@ This is a hardened fork of [cyaneous/hass-mitsubishi_matouch](https://github.com
 focused on running several MA Touch (PAR-CT01MAU) thermostats reliably over ESP32
 Bluetooth proxies, 24/7.
 
+## 0.14.16
+
+- **RE: on-demand device-info / capability fetch (`fetch_device_info` service).** The
+  device-info command is a data frame (`0x0005`) that only works **inside a
+  session_type-3 begin/data/end sequence** (RE'd from the SDK; the session type rides in
+  a begin-session frame, not the data frame — which is why the earlier standalone
+  `0x0003` attempt was rejected). `async_get_device_info()` now runs that full sequence
+  using the stored PIN, and a new on-demand `fetch_device_info` service exposes it for a
+  single unit. **On-demand only — never the login/poll path**, so a failure fails just
+  that one call (at most one reconnect) and cannot loop. Returns the raw ~76-77-byte
+  capability blob, to be parsed into per-unit capabilities next.
+
 ## 0.14.15
 
 - **Add a safe, on-demand `send_raw_request` debug service (RE tooling).** Sends ONE

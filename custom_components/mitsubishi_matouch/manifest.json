@@ -20,5 +20,5 @@
   "issue_tracker": "https://github.com/mikenemat/hass-mitsubishi_matouch/issues",
   "loggers": ["mitsubishi_matouch"],
   "requirements": ["construct>=2.10.68", "construct-typing>=0.6.2"],
-  "version": "0.14.15"
+  "version": "0.14.16"
 }

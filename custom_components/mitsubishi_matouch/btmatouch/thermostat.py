@@ -436,18 +436,38 @@ class Thermostat:
         return status
 
     async def async_get_device_info(self) -> bytes:
-        """Fetch the device-info / capability blob and return the raw response.
+        """Fetch the device-info / capability blob via the full session-3 sequence and
+        return the raw response.
 
-        Per the MELRemo SDK (controller/c0.d issues e(3) a(0,0) as a get-data and parses
-        the reply as model/m0/i/a), this is message_type 0x0003 sent as GET-DATA
-        (request_flag 0x00, no PIN) — distinct from the auth-carrying 0x0003 in
-        async_login. The response body carries per-unit capabilities (supported fan
-        steps, vane, louver, vent, right/left, move-eye, hold, temp unit/step, model
-        class). The byte layout is parsed once confirmed against a real capture.
+        Per the MELRemo SDK, the device-info command is a DATA frame (0x0005 = L2 data
+        phase + L3 a(0,0)) that only works INSIDE a session_type-3 session — so it must
+        be wrapped: begin-session-3 (with the stored PIN) -> 0x0005 -> end-session-3.
+        (An earlier attempt sent 0x0003 standalone, which the device rejected and dropped
+        the link, because 0x03 is the end-session phase byte.) Response body carries the
+        per-unit capabilities (model/m0/i/a, ~76-77 bytes).
+
+        ON-DEMAND ONLY. NOT to be called on the login/poll path — a failure fails just
+        this call (at most one reconnect), it cannot loop. validate=False throughout so
+        unexpected acks don't raise and the raw capability bytes are returned.
         """
 
-        request = _MAStatusRequest(message_type=_MAMessageType.UNKNOWN_1, request_flag=0x00)
-        return await self._async_write_request(request)
+        begin = _MAAuthenticatedRequest(
+            message_type=_MAMessageType.BEGIN_SESSION_3, request_flag=0x01, pin=self._pin
+        )
+        await self._async_write_request(begin, validate=False)
+
+        info = _MAStatusRequest(message_type=_MAMessageType.DEVICE_INFO_REQUEST, request_flag=0x00)
+        resp = await self._async_write_request(info, validate=False)
+
+        try:
+            end = _MAAuthenticatedRequest(
+                message_type=_MAMessageType.END_SESSION_3, request_flag=0x01, pin=self._pin
+            )
+            await self._async_write_request(end, validate=False)
+        except Exception as ex:  # noqa: BLE001 - end-session is best-effort cleanup
+            _LOGGER.debug("[%s] device-info end-session failed: %s", self._mac_address, ex)
+
+        return resp
 
     async def async_send_raw_request(self, message_type: int, request_flag: int = 0x00, payload: bytes = b"") -> bytes:
         """DEBUG / RE ONLY: send one arbitrary request and return the raw response

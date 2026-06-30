@@ -65,6 +65,11 @@ SEND_RAW_REQUEST_SCHEMA = vol.Schema(
     }
 )
 
+# DEBUG / RE: on-demand device-info / capability fetch for one unit (the session-3
+# begin/data/end sequence). Off the login/poll path.
+SERVICE_FETCH_DEVICE_INFO = "fetch_device_info"
+FETCH_DEVICE_INFO_SCHEMA = vol.Schema({vol.Required("mac"): cv.string})
+
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Register integration-level services (telemetry export for R&D)."""
@@ -120,6 +125,38 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         SERVICE_SEND_RAW_REQUEST,
         _send_raw_request,
         schema=SEND_RAW_REQUEST_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
+    )
+
+    async def _fetch_device_info(call: ServiceCall) -> ServiceResponse:
+        """DEBUG/RE on-demand: fetch the device-info/capability blob for one unit (the
+        session-3 begin/data/end sequence). Returns the raw response hex."""
+
+        target = format_mac(call.data["mac"])
+        coordinator = None
+        for entry in hass.config_entries.async_entries(DOMAIN):
+            rt = getattr(entry, "runtime_data", None)
+            if rt is None:
+                continue
+            coordinator = next(
+                (c for c in rt.coordinators.values() if format_mac(c.mac_address) == target),
+                None,
+            )
+            if coordinator is not None:
+                break
+        if coordinator is None:
+            return {"error": f"no thermostat for mac {call.data['mac']}"}
+        try:
+            resp = await coordinator.async_fetch_device_info()
+            return {"mac": coordinator.mac_address, "len": len(resp), "response_hex": resp.hex()}
+        except Exception as ex:  # noqa: BLE001 - surface any error as data, never raise
+            return {"mac": coordinator.mac_address, "error": str(ex)}
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_FETCH_DEVICE_INFO,
+        _fetch_device_info,
+        schema=FETCH_DEVICE_INFO_SCHEMA,
         supports_response=SupportsResponse.ONLY,
     )
     return True

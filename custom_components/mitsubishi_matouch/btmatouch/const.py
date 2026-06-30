@@ -130,6 +130,12 @@ class _MAMessageType(EnumBase):
     UNKNOWN_5 = 0x0103 # used during teardown steps, theory: end session?
     STATUS_REQUEST = 0x0205 # request thermostat status
     CONTROL_REQUEST = 0x0105 # control the thermostat
+    # Device-info / capability fetch (RE'd from MELRemo). The capability blob is a
+    # data frame (0x0005 = L2 phase "data" 0x05 + L3 a(0,0)) sent INSIDE a session_type-3
+    # session, so it must be wrapped: begin-session-3 (with PIN) -> 0x0005 -> end-session-3.
+    BEGIN_SESSION_3 = 0x0301 # L2 phase "begin" 0x01 + session_type 3
+    DEVICE_INFO_REQUEST = 0x0005 # L2 phase "data" 0x05 + L3 a(0,0)
+    END_SESSION_3 = 0x0303 # L2 phase "end" 0x03 + session_type 3
 
 
 class _MAResult(EnumBase):

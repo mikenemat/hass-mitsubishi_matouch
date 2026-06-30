@@ -662,6 +662,12 @@ class MACoordinator(DataUpdateCoordinator):
 
         return await self._thermostat.async_send_raw_request(message_type, request_flag, payload)
 
+    async def async_fetch_device_info(self) -> bytes:
+        """DEBUG / RE on-demand: fetch the device-info / capability blob via the
+        session-3 begin/data/end sequence (see Thermostat.async_get_device_info)."""
+
+        return await self._thermostat.async_get_device_info()
+
     async def async_close_connection(self) -> None:
         """Disconnect the persistent BLE connection (called on unload)."""
 
