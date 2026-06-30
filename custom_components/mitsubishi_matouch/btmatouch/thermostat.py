@@ -369,13 +369,12 @@ class Thermostat:
         request = _MAAuthenticatedRequest(message_type=_MAMessageType.UNKNOWN_2, request_flag=0x01, pin=pin)
         self._login_responses["0x0401"] = (await self._async_write_request(request)).hex()
 
-        # Fetch the device-info / capability blob (best-effort; MUST NOT break login).
-        # Per the SDK (c0.d -> e(3) a(0,0) get-data) this is message_type 0x0003 sent as
-        # a GET-DATA (request_flag 0x00, no PIN), distinct from the auth 0x0003 above.
-        try:
-            self._last_device_info_hex = (await self.async_get_device_info()).hex()
-        except Exception as ex:  # noqa: BLE001 - device-info is non-critical
-            self._last_device_info_hex = f"error: {ex}"
+        # NOTE: device-info fetch (async_get_device_info) intentionally NOT called here.
+        # In v0.14.12 calling it during login broke ALL units: the device replies to the
+        # 0x0003 get-data with a 2-byte runt that desynced the frame assembler and failed
+        # every subsequent poll (units went unavailable). The request framing is wrong
+        # and/or the receive buffer doesn't recover from a runt. Left dormant until both
+        # are fixed and validated. DO NOT re-enable on the login path without that.
 
     async def async_logout(self, pin: int) -> None:
         """Unknown messages at end of connection.

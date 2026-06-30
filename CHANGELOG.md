@@ -4,6 +4,17 @@ This is a hardened fork of [cyaneous/hass-mitsubishi_matouch](https://github.com
 focused on running several MA Touch (PAR-CT01MAU) thermostats reliably over ESP32
 Bluetooth proxies, 24/7.
 
+## 0.14.13
+
+- **HOTFIX: revert the v0.14.12 device-info fetch — it took all units offline.** Calling
+  `async_get_device_info()` during login made the device reply to the `0x0003` get-data
+  with a 2-byte **runt** frame that desynced the frame assembler, so every subsequent
+  status poll failed and **all thermostats went `unavailable`**. The get-data request
+  framing is wrong and the receive buffer doesn't recover from a runt. The fetch is no
+  longer called on the login path (the method is left dormant). Units recover on the next
+  connect after deploying this. Capability detection will be retried only after the
+  request framing and runt-recovery are fixed and validated off the live fleet.
+
 ## 0.14.12
 
 - **RE groundwork: fetch the device-info / capability blob.** Added
