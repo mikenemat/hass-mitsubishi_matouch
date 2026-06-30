@@ -170,8 +170,14 @@ class _MAControlRequest(_MARequest):
     unknown_setpoint_2: float = csfield(_MATemperature(Bytes(2)))
     unknown_setpoint_3: float = csfield(_MATemperature(Bytes(2)))
     vane_fan_mode: int = csfield(Int8un)
-    unknown_1: int = csfield(Const(0x00, Int8un))
-    unknown_2: int = csfield(Const(0x00, Int8un))
+    # Trailing value bytes (were Const 0x00). Per the MELRemo control body
+    # (model/m0/m/b.java), with the matching change-flag set in flags_c:
+    #   louver_vent      = (vent_mb << 4) | louver_mb           (flags_c louver 0x04, vent 0x08)
+    #   hold_rl_move_eye = (move_eye_mb << 4) | (right_left_mb << 1) | hold_mb
+    #                                                            (flags_c hold 0x10, right_left 0x20, move_eye 0x40)
+    # 0 = "no change" (the device ignores a value whose flags_c bit is unset).
+    louver_vent: int = csfield(Int8un)
+    hold_rl_move_eye: int = csfield(Int8un)
 
 
 @dataclass

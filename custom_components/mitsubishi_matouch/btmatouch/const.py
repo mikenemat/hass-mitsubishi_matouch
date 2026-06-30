@@ -12,6 +12,9 @@ __all__ = [
     "MAOperationMode",
     "MAFanMode",
     "MAVaneMode",
+    "MAVentMode",
+    "MARightLeftMode",
+    "MAMoveEyeMode",
 ]
 
 
@@ -67,6 +70,44 @@ class MAVaneMode(EnumBase):
     STEP_4 = 1
     STEP_5 = 0
     SWING = 7
+
+
+# --- additional control axes (wire values, from the MELRemo SDK) ---
+# These ride in the two trailing bytes of the control frame (see _MAControlRequest):
+#   louver_vent      byte = (vent << 4) | louver
+#   hold_rl_move_eye byte = (move_eye << 4) | (right_left << 1) | hold
+# with the change-flag in flags_c (louver 0x04, vent 0x08, hold 0x10,
+# right_left 0x20, move_eye 0x40). Support is capability-gated per unit.
+
+
+class MAVentMode(IntEnum):
+    """Ventilation (Lossnay) mode — wire values."""
+
+    OFF = 0
+    LOW = 1
+    HIGH = 2
+
+
+class MARightLeftMode(IntEnum):
+    """Left/right (horizontal) vane position — wire values."""
+
+    CENTER = 0
+    SWING = 1
+    AUTO = 2
+    LEFT = 3
+    LEFT_CENTER = 4
+    RIGHT_CENTER = 5
+    RIGHT = 6
+
+
+class MAMoveEyeMode(IntEnum):
+    """Move-Eye (i-see occupancy airflow) mode — wire values."""
+
+    OFF = 0
+    DIRECT = 1
+    INDIRECT = 2
+    AREA = 3
+    AUTO = 4
 
 
 class _MACharacteristic(StrEnum):

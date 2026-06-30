@@ -37,6 +37,9 @@ from .const import (
     _MAOperationModeFlags,
     MAVaneMode,
     MAFanMode,
+    MAVentMode,
+    MARightLeftMode,
+    MAMoveEyeMode,
 )
 from .exceptions import (
     MAAlreadyAwaitingResponseException,
@@ -536,6 +539,31 @@ class Thermostat:
             vane_mode=vane_mode
         )
 
+    async def async_set_hold(self, on: bool) -> None:
+        """Set HOLD (keep the current setpoint / suspend schedule)."""
+
+        await self._async_write_control_request(flags_c=0x10, hold=1 if on else 0)
+
+    async def async_set_louver(self, on: bool) -> None:
+        """Set the louver on/off (capability-gated; not on all units)."""
+
+        await self._async_write_control_request(flags_c=0x04, louver=1 if on else 0)
+
+    async def async_set_vent_mode(self, vent_mode: MAVentMode) -> None:
+        """Set the ventilation (Lossnay) mode (capability-gated)."""
+
+        await self._async_write_control_request(flags_c=0x08, vent=int(vent_mode))
+
+    async def async_set_right_left_mode(self, right_left_mode: MARightLeftMode) -> None:
+        """Set the left/right (horizontal) vane position (capability-gated)."""
+
+        await self._async_write_control_request(flags_c=0x20, right_left=int(right_left_mode))
+
+    async def async_set_move_eye_mode(self, move_eye_mode: MAMoveEyeMode) -> None:
+        """Set the Move-Eye (i-see occupancy airflow) mode (capability-gated)."""
+
+        await self._async_write_control_request(flags_c=0x40, move_eye=int(move_eye_mode))
+
     ### Internal ###
 
     async def __aenter__(self) -> Self:
@@ -702,7 +730,12 @@ class Thermostat:
         cool_setpoint: float = 0,
         heat_setpoint: float = 0,
         fan_mode: MAFanMode = MAFanMode.NONE,
-        vane_mode: MAVaneMode = MAVaneMode.NONE
+        vane_mode: MAVaneMode = MAVaneMode.NONE,
+        louver: int = 0,
+        vent: int = 0,
+        right_left: int = 0,
+        move_eye: int = 0,
+        hold: int = 0,
     ) -> None:
         request = _MAControlRequest(
             message_type=_MAMessageType.CONTROL_REQUEST,
@@ -716,7 +749,9 @@ class Thermostat:
             unknown_setpoint_1=0,
             unknown_setpoint_2=0,
             unknown_setpoint_3=0,
-            vane_fan_mode=(vane_mode.value << 4) + (fan_mode.value >> 4)
+            vane_fan_mode=(vane_mode.value << 4) + (fan_mode.value >> 4),
+            louver_vent=((int(vent) & 0x0F) << 4) | (int(louver) & 0x0F),
+            hold_rl_move_eye=((int(move_eye) & 0x07) << 4) | ((int(right_left) & 0x07) << 1) | (int(hold) & 0x01),
         )
 
         response_bytes = await self._async_write_request(request)
