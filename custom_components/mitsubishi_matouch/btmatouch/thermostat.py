@@ -475,23 +475,69 @@ class Thermostat:
             except Exception as ex:  # noqa: BLE001
                 out[label] = f"error: {ex}"
 
-        # begin session 0 (outer operation session, USER) — identical frame to LOGIN.
+        # Sequence mirrors the PROVEN login handshake (begin-0 -> end-0 -> begin-N):
+        # sessions do NOT nest, so session-0 must be ENDED before opening session-3 —
+        # otherwise the device returns 0x02 RESTART_JOB (confirmed live 2026-06-30: a
+        # begin-3 issued while session-0 was still open got 0x02). The static SDK trace
+        # suggested a nested begin-0/begin-3, but the live device requires the same
+        # exclusive begin/end discipline the working login uses for session-4.
+        #   begin-0 (0x0001) -> end-0 (0x0003) -> begin-3 (0x0301) -> data a(0,0)
+        #   (0x0005) -> end-3 (0x0303)
+        # begin/end carry the USER PIN (flag 0x01); the data frame is flagless (0x00).
         await _send("begin0", _MAAuthenticatedRequest(
             message_type=_MAMessageType.LOGIN_REQUEST, request_flag=0x01, pin=pin))
+        # end session 0 (message_type 0x0003) — free the link so begin-3 is accepted.
+        await _send("end0", _MAAuthenticatedRequest(
+            message_type=_MAMessageType.UNKNOWN_1, request_flag=0x01, pin=pin))
         # begin session 3 (device-info session, USER). Resp result byte 0 == ok,
-        # 0x02 == RESTART_JOB (we're not actually in IDLE), 0x0a == real bad PIN.
+        # 0x02 == RESTART_JOB (session not free), 0x0a == real bad PIN.
         await _send("begin3", _MAAuthenticatedRequest(
             message_type=_MAMessageType.BEGIN_SESSION_3, request_flag=0x01, pin=pin))
         # data a(0,0) — the capability blob (~76-77 bytes). THIS is the payload we want.
         await _send("data", _MAStatusRequest(
             message_type=_MAMessageType.DEVICE_INFO_REQUEST, request_flag=0x00))
         self._last_device_info_hex = out.get("data")
-        # end session 3, then end session 0 (== message_type 0x0003) — clean teardown.
+        # end session 3 — clean teardown (then the coordinator disconnects).
         await _send("end3", _MAAuthenticatedRequest(
             message_type=_MAMessageType.END_SESSION_3, request_flag=0x01, pin=pin))
-        await _send("end0", _MAAuthenticatedRequest(
-            message_type=_MAMessageType.UNKNOWN_1, request_flag=0x01, pin=pin))
 
+        return out
+
+    async def async_run_idle_sequence(self, steps: list[dict]) -> list[dict]:
+        """DEBUG/RE: run an arbitrary ordered frame sequence on the current connection
+        (assumed fresh + IDLE) and return each step's request + raw response hex. This
+        is the multi-frame analogue of async_send_raw_request: it lets a whole session
+        lifecycle (device-info, fault history, energy, ...) be cracked LIVE against one
+        unit without a redeploy per hypothesis.
+
+        Each step = {"message_type": int, "request_flag": int=1, "pin": bool=True}.
+        A pin=True step is an authenticated frame (message_type LE + flag + stored PIN
+        + 3 zero bytes); pin=False is a bare status-style frame (message_type LE + flag).
+        validate=False so an unexpected/failure ack is captured rather than raised, and
+        the sequence always runs to the end.
+
+        PRECONDITION: a fresh IDLE connection (the coordinator closes the operation link
+        and reconnects without login before calling this). ON-DEMAND + single-unit only,
+        off the recurring poll path (v0.14.12 lesson).
+        """
+
+        out: list[dict] = []
+        for i, step in enumerate(steps):
+            mt = int(step["message_type"]) & 0xFFFF
+            flag = int(step.get("request_flag", 0x01)) & 0xFF
+            use_pin = bool(step.get("pin", True))
+            body = mt.to_bytes(2, "little") + bytes([flag])
+            if use_pin:
+                body += (self._pin & 0xFFFF).to_bytes(2, "little") + b"\x00\x00\x00"
+            entry: dict[str, str] = {
+                "i": str(i), "mt": f"0x{mt:04x}", "flag": str(flag),
+                "pin": str(use_pin), "req": body.hex(),
+            }
+            try:
+                entry["resp"] = (await self._async_write_request(_RawRequest(mt, body), validate=False)).hex()
+            except Exception as ex:  # noqa: BLE001
+                entry["resp"] = f"error: {ex}"
+            out.append(entry)
         return out
 
     async def async_send_raw_request(self, message_type: int, request_flag: int = 0x00, payload: bytes = b"") -> bytes:

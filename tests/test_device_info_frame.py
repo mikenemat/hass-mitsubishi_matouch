@@ -1,12 +1,15 @@
 """Device-info (capability blob) frame serialization — locked byte-exact against the
 constraint-verified MELRemo SDK model.
 
-The capability blob is fetched as a session-3 job from IDLE:
-    begin-0 -> begin-3 -> data a(0,0) -> end-3 -> end-0
+The capability blob is fetched as a session-3 job from IDLE, mirroring the proven
+login handshake (sessions don't nest — session-0 is ended before session-3 is begun):
+    begin-0 -> end-0 -> begin-3 -> data a(0,0) -> end-3
 using the ordinary USER PIN (ADMIN is NOT required). These tests assert the exact
 on-wire bytes for each frame so a refactor of the struct builders or the framing/
 checksum can't silently re-break the sequence (which is hard to debug live, and which
-once took the whole fleet offline — see the v0.14.12 outage).
+once took the whole fleet offline — see the v0.14.12 outage). NOTE: the `end sess0`
+frame (message_type 0x0003) is used as the mid-sequence end-0 here; its bytes are the
+same regardless of position, so the per-frame assertions below still hold.
 
 Reference frames (PIN 0x3C7F, message_id 0), verified byte-exact against the decompiled
 SDK packer (sdk/a.java + model/m0 layouts):

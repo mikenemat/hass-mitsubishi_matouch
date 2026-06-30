@@ -120,6 +120,10 @@ class MACoordinator(DataUpdateCoordinator):
         # multi-frame session-3 sequence can't interleave with a status poll.
         self._device_info_request = False
         self._device_info_result: dict[str, str] | None = None
+        # DEBUG/RE: an arbitrary IDLE-session frame sequence (run_idle_sequence) — same
+        # fresh-connection lifecycle as device-info, used to crack session lifecycles live.
+        self._idle_sequence_steps: list | None = None
+        self._idle_sequence_result: list | None = None
 
     @property
     def firmware_version(self) ->  str | None:
@@ -389,24 +393,31 @@ class MACoordinator(DataUpdateCoordinator):
         failure counter (which is what left units looking online through a full outage).
         """
 
-        # DEBUG/RE: on-demand device-info fetch (capability blob). Per the decompiled
-        # MELRemo SDK the blob is a session-3 DATA frame (a(0,0)) the device only answers
-        # while session 3 is the ACTIVE session — and a session-3 begin can't be opened on
-        # top of the live operation session (session 4): the device returns 0x02
-        # RESTART_JOB. So device-info must run as its own job from IDLE: do it on a FRESH
-        # connection with NO login, tear it down, then fall through to the normal
-        # connect+login+status below. On-demand + single-unit only — NEVER the recurring
-        # fleet path (v0.14.12 outage). Best-effort: a failure here can't break the poll
-        # (the status read below still runs on a clean reconnect). Runs first, while the
-        # link is still IDLE, so begin-session-3 isn't rejected by an open session 4.
-        if self._device_info_request:
+        # DEBUG/RE: on-demand IDLE-session job — either the device-info capability fetch
+        # or an arbitrary frame sequence (run_idle_sequence). Both must start from IDLE:
+        # a session-3/5 begin can't be opened on top of the live operation session
+        # (session 4) — the device returns 0x02 RESTART_JOB — and session-0 must be ended
+        # before the next begin (sessions don't nest). So run it on a FRESH connection
+        # with NO login, tear it down, then fall through to the normal connect+login+status
+        # below. On-demand + single-unit only — NEVER the recurring fleet path (v0.14.12
+        # outage). Best-effort: a failure here can't break the poll (the status read below
+        # still runs on a clean reconnect).
+        if self._device_info_request or self._idle_sequence_steps is not None:
+            steps = self._idle_sequence_steps
             self._device_info_request = False
+            self._idle_sequence_steps = None
             try:
                 await self._thermostat.async_close()    # drop session 4 -> device returns to IDLE
                 await self._thermostat.async_connect()  # fresh link, NOT logged in (IDLE)
-                self._device_info_result = await self._thermostat.async_get_device_info()
+                if steps is not None:
+                    self._idle_sequence_result = await self._thermostat.async_run_idle_sequence(steps)
+                else:
+                    self._device_info_result = await self._thermostat.async_get_device_info()
             except Exception as ex:  # noqa: BLE001
-                self._device_info_result = {"error": str(ex)}
+                if steps is not None:
+                    self._idle_sequence_result = [{"error": str(ex)}]
+                else:
+                    self._device_info_result = {"error": str(ex)}
             finally:
                 try:
                     await self._thermostat.async_disconnect()
@@ -512,10 +523,14 @@ class MACoordinator(DataUpdateCoordinator):
 
         started = time.monotonic()
         try:
-            # A pending device-info fetch makes this poll do extra work (close + fresh
-            # IDLE connect + 5-frame session-3 job + disconnect, THEN the normal
+            # A pending device-info fetch / IDLE sequence makes this poll do extra work
+            # (close + fresh IDLE connect + multi-frame job + disconnect, THEN the normal
             # reconnect+login+status), so give it more headroom than a plain poll.
-            poll_timeout = max(_POLL_TIMEOUT, 60) if self._device_info_request else _POLL_TIMEOUT
+            poll_timeout = (
+                max(_POLL_TIMEOUT, 60)
+                if (self._device_info_request or self._idle_sequence_steps is not None)
+                else _POLL_TIMEOUT
+            )
             async with asyncio.timeout(poll_timeout):
                 status = await self._run_poll()
             self.last_poll_duration = time.monotonic() - started
@@ -707,6 +722,18 @@ class MACoordinator(DataUpdateCoordinator):
         if self._device_info_result is None:
             return {"error": "fetch did not run (poll failed or unit unreachable)"}
         return self._device_info_result
+
+    async def async_run_idle_sequence(self, steps: list) -> list:
+        """DEBUG / RE on-demand: run an arbitrary frame sequence from IDLE on a fresh
+        connection (off the poll path) and return each step's request + raw response.
+        Lets a multi-frame session lifecycle be cracked live without a redeploy."""
+
+        self._idle_sequence_steps = steps
+        self._idle_sequence_result = None
+        await self.async_refresh()
+        if self._idle_sequence_result is None:
+            return [{"error": "sequence did not run (poll failed or unit unreachable)"}]
+        return self._idle_sequence_result
 
     async def async_close_connection(self) -> None:
         """Disconnect the persistent BLE connection (called on unload)."""

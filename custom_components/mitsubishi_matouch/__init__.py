@@ -70,6 +70,27 @@ SEND_RAW_REQUEST_SCHEMA = vol.Schema(
 SERVICE_FETCH_DEVICE_INFO = "fetch_device_info"
 FETCH_DEVICE_INFO_SCHEMA = vol.Schema({vol.Required("mac"): cv.string})
 
+# DEBUG / RE: run an arbitrary ORDERED frame sequence from IDLE against one unit (on a
+# fresh, no-login connection) and return each step's request + raw response. The
+# multi-frame analogue of send_raw_request — used to crack whole session lifecycles
+# (device-info, fault history, energy) live without a redeploy per hypothesis. Off the
+# login/poll path; single-unit only.
+SERVICE_RUN_IDLE_SEQUENCE = "run_idle_sequence"
+RUN_IDLE_SEQUENCE_SCHEMA = vol.Schema(
+    {
+        vol.Required("mac"): cv.string,
+        vol.Required("steps"): [
+            vol.Schema(
+                {
+                    vol.Required("message_type"): vol.Coerce(int),
+                    vol.Optional("request_flag", default=1): vol.All(vol.Coerce(int), vol.Range(min=0, max=255)),
+                    vol.Optional("pin", default=True): cv.boolean,
+                }
+            )
+        ],
+    }
+)
+
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Register integration-level services (telemetry export for R&D)."""
@@ -157,6 +178,37 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         SERVICE_FETCH_DEVICE_INFO,
         _fetch_device_info,
         schema=FETCH_DEVICE_INFO_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
+    )
+
+    async def _run_idle_sequence(call: ServiceCall) -> ServiceResponse:
+        """DEBUG/RE: run an arbitrary frame sequence from IDLE against one unit."""
+
+        target = format_mac(call.data["mac"])
+        coordinator = None
+        for entry in hass.config_entries.async_entries(DOMAIN):
+            rt = getattr(entry, "runtime_data", None)
+            if rt is None:
+                continue
+            coordinator = next(
+                (c for c in rt.coordinators.values() if format_mac(c.mac_address) == target),
+                None,
+            )
+            if coordinator is not None:
+                break
+        if coordinator is None:
+            return {"error": f"no thermostat for mac {call.data['mac']}"}
+        try:
+            steps = await coordinator.async_run_idle_sequence(call.data["steps"])
+            return {"mac": coordinator.mac_address, "steps": steps}
+        except Exception as ex:  # noqa: BLE001 - surface any error as data, never raise
+            return {"mac": coordinator.mac_address, "error": str(ex)}
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_RUN_IDLE_SEQUENCE,
+        _run_idle_sequence,
+        schema=RUN_IDLE_SEQUENCE_SCHEMA,
         supports_response=SupportsResponse.ONLY,
     )
     return True
