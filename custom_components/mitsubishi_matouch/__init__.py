@@ -41,6 +41,8 @@ _LOGGER = logging.getLogger(__name__)
 PLATFORMS = [
     Platform.CLIMATE,
     Platform.SENSOR,
+    Platform.SWITCH,
+    Platform.SELECT,
 ]
 
 SERVICE_GET_TELEMETRY = "get_telemetry"
@@ -252,6 +254,7 @@ def _build_coordinator(hass: HomeAssistant, entry: MAConfigEntry, subentry: Conf
         balancer=balancer,
         telemetry=telemetry,
         name=name,
+        subentry_id=subentry.subentry_id,
         log_polls=entry.options.get("log_polls", False),
         capture_raw_frames=entry.options.get("capture_raw_frames", False),
     )

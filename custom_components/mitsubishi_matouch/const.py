@@ -103,6 +103,12 @@ PROXY_RSSI_FLOOR = -90
 # added at runtime so the platforms create its entities without a parent reload.
 SIGNAL_NEW_THERMOSTAT = "mitsubishi_matouch_new_thermostat"
 
+# Dispatcher signal (namespaced per entry, payload = subentry_id) fired once when a
+# unit's capability blob first loads. Capability-gated entities that only make sense on
+# units with the feature (the Vane select, the Hold switch) are created in response, so
+# they appear only where supported rather than as permanently-unavailable phantoms.
+SIGNAL_CAPS_LOADED = "mitsubishi_matouch_caps_loaded"
+
 # Active-rebalance tuning. Rebalance is event-driven (proxy online/offline) with a
 # slow periodic backstop; a debouncer coalesces bursts and serializes runs.
 REBALANCE_INTERVAL = 600       # slow periodic backstop (seconds)

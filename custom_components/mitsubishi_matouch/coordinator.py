@@ -11,6 +11,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.components import bluetooth
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed, ConfigEntryAuthFailed
 from homeassistant.helpers import issue_registry as ir
+from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.exceptions import HomeAssistantError
 
 from bleak.backends.device import BLEDevice
@@ -22,7 +23,7 @@ from .btmatouch.exceptions import MAException, MAAuthException, MAControlRequest
 from .models import MAConfigEntry
 from .proxy_balancer import MAProxyBalancer
 from .telemetry import MATelemetryLog
-from .const import DOMAIN, MAX_BACKOFF_INTERVAL, WEDGED_UNIT_THRESHOLD
+from .const import DOMAIN, MAX_BACKOFF_INTERVAL, WEDGED_UNIT_THRESHOLD, SIGNAL_CAPS_LOADED
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -56,7 +57,7 @@ _MAX_CAPS_ATTEMPTS = 3
 class MACoordinator(DataUpdateCoordinator):
     """Mitsubishi MA Touch data update coordinator."""
 
-    def __init__(self, hass: HomeAssistant, config_entry: MAConfigEntry, pin: str, scan_interval: int, address: str, ble_device: BLEDevice | None, balancer: MAProxyBalancer, telemetry: MATelemetryLog, name: str, log_polls: bool = False, capture_raw_frames: bool = False):
+    def __init__(self, hass: HomeAssistant, config_entry: MAConfigEntry, pin: str, scan_interval: int, address: str, ble_device: BLEDevice | None, balancer: MAProxyBalancer, telemetry: MATelemetryLog, name: str, subentry_id: str | None = None, log_polls: bool = False, capture_raw_frames: bool = False):
         """Initialize the coordinator."""
 
         super().__init__(
@@ -75,6 +76,7 @@ class MACoordinator(DataUpdateCoordinator):
 
         self._mac_address = address
         self.device_name = name
+        self._subentry_id = subentry_id
         self._balancer = balancer
         self._telemetry = telemetry
         self._log_polls = log_polls
@@ -130,11 +132,13 @@ class MACoordinator(DataUpdateCoordinator):
         self._idle_sequence_steps: list | None = None
         self._idle_sequence_result: list | None = None
         # Capability detection: auto-fetch the device-info blob ONCE per connection
-        # lifetime (lazily, after the first successful poll), so the climate entity can
-        # gate fan/swing/HVAC modes to what this unit actually supports. Capped attempts
-        # so a unit that won't answer device-info can't churn its link forever (it just
-        # falls back to ungated modes). Caps are static, cached on the Thermostat.
+        # lifetime (lazily, after the first successful poll), so entities can gate to what
+        # this unit actually supports. Capped attempts so a unit that won't answer
+        # device-info can't churn its link forever (it just falls back to ungated modes).
+        # Caps are static, cached on the Thermostat. _caps_signaled guards the one-shot
+        # SIGNAL_CAPS_LOADED dispatch (which creates the per-unit Vane/Hold entities).
         self._caps_attempts = 0
+        self._caps_signaled = False
 
     @property
     def firmware_version(self) ->  str | None:
@@ -566,6 +570,16 @@ class MACoordinator(DataUpdateCoordinator):
             ):
                 self._caps_attempts += 1
                 self._device_info_request = True
+            # Caps just became available: fire once so the per-unit capability entities
+            # (Vane select / Hold switch) are created for this unit if it supports them.
+            elif self.capabilities is not None and not self._caps_signaled:
+                self._caps_signaled = True
+                if self._subentry_id is not None:
+                    async_dispatcher_send(
+                        self.hass,
+                        f"{SIGNAL_CAPS_LOADED}_{self.config_entry.entry_id}",
+                        self._subentry_id,
+                    )
             await self._record_poll(
                 True,
                 room_temperature=status.room_temperature,

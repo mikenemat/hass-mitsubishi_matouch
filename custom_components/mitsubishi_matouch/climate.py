@@ -10,7 +10,6 @@ from homeassistant.components.climate import (
     HVACAction,
     HVACMode,
 )
-from homeassistant.components.climate.const import SWING_ON, SWING_OFF, PRESET_NONE
 from homeassistant.const import ATTR_TEMPERATURE, PRECISION_HALVES, PRECISION_WHOLE, UnitOfTemperature
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ServiceValidationError
@@ -20,7 +19,7 @@ from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .btmatouch.const import MA_MIN_TEMP, MA_MAX_TEMP, MAOperationMode, MAVaneMode
+from .btmatouch.const import MA_MIN_TEMP, MA_MAX_TEMP, MAOperationMode
 from .btmatouch.exceptions import MAException
 from .coordinator import MACoordinator
 from .temperature import from_display_setpoint, to_display_room, to_display_setpoint
@@ -33,9 +32,6 @@ from .const import (
     HA_TO_MA_HVAC,
     MA_TO_HA_FAN,
     HA_TO_MA_FAN,
-    MA_VANE_VALUE_TO_HA,
-    HA_TO_MA_VANE,
-    PRESET_HOLD,
     SIGNAL_NEW_THERMOSTAT,
     SUBENTRY_TYPE_THERMOSTAT,
 )
@@ -82,10 +78,11 @@ class MAClimate(CoordinatorEntity[MACoordinator], ClimateEntity):
     _attr_name = None
     _attr_translation_key = "matouch"
 
-    # Base features always present. SWING_MODE is added per-unit (supported_features)
-    # only when the unit has a controllable vane, so vane-less units don't show a swing
-    # control that would just revert.
-    _BASE_FEATURES = (
+    # Vane and Hold are exposed as DEDICATED entities (a "Vane" select + a "Hold" switch,
+    # created per-unit once capabilities are known) rather than the climate swing/preset —
+    # so the labels are correct (a fixed vane position isn't a "swing", and Hold reads as a
+    # plain on/off). The climate entity itself therefore carries no swing/preset feature.
+    _attr_supported_features = (
         ClimateEntityFeature.TARGET_TEMPERATURE
         | ClimateEntityFeature.TARGET_TEMPERATURE_RANGE
         | ClimateEntityFeature.FAN_MODE
@@ -179,28 +176,6 @@ class MAClimate(CoordinatorEntity[MACoordinator], ClimateEntity):
     def _caps(self):
         """Parsed per-unit capabilities, or None until first fetched."""
         return self.coordinator.capabilities
-
-    @property
-    def supported_features(self) -> ClimateEntityFeature:
-        features = self._BASE_FEATURES
-        caps = self._caps
-        # SWING_MODE while caps are unknown (don't hide prematurely) or when the unit
-        # has a vane. PRESET_MODE only once we KNOW the unit supports hold (so a unit
-        # that can't hold — e.g. Theater — never shows a hold preset that would revert).
-        if caps is None or caps.supports_swing:
-            features |= ClimateEntityFeature.SWING_MODE
-        if caps is not None and caps.hold:
-            features |= ClimateEntityFeature.PRESET_MODE
-        return features
-
-    @property
-    def swing_modes(self) -> list[str]:
-        """Vane positions this unit supports (auto / 1..5 / swing) once caps are known;
-        the plain on/off pair until then."""
-        caps = self._caps
-        if caps is not None and caps.supports_swing:
-            return caps.vane_modes()
-        return [SWING_ON, SWING_OFF]
 
     @property
     def hvac_modes(self) -> list[HVACMode]:
@@ -347,33 +322,6 @@ class MAClimate(CoordinatorEntity[MACoordinator], ClimateEntity):
         return MA_TO_HA_FAN.get(status.fan_mode) if status else None
 
     @property
-    def swing_mode(self) -> str | None:
-        status = self._status
-        if status is None:
-            return None
-        caps = self._caps
-        if caps is not None and caps.supports_swing:
-            # Map by wire value (MAVaneMode.NONE/STEP_5 both == 0, so an enum lookup of
-            # 0 would mis-resolve to NONE).
-            return MA_VANE_VALUE_TO_HA.get(int(status.vane_mode))
-        return SWING_ON if status.vane_mode is MAVaneMode.SWING else SWING_OFF
-
-    @property
-    def preset_modes(self) -> list[str] | None:
-        caps = self._caps
-        if caps is not None and caps.hold:
-            return [PRESET_NONE, PRESET_HOLD]
-        return None
-
-    @property
-    def preset_mode(self) -> str | None:
-        status = self._status
-        caps = self._caps
-        if status is None or caps is None or not caps.hold:
-            return None
-        return PRESET_HOLD if getattr(status, "hold", False) else PRESET_NONE
-
-    @property
     def hvac_action(self) -> HVACAction | None:
         status = self._status
         if status is None:
@@ -444,27 +392,3 @@ class MAClimate(CoordinatorEntity[MACoordinator], ClimateEntity):
             await self.coordinator.async_set_fan_mode(HA_TO_MA_FAN[fan_mode])
         except MAException as ex:
             raise ServiceValidationError(f"Failed to set fan mode: {ex}") from ex
-
-    async def async_set_swing_mode(self, swing_mode: str) -> None:
-        """Set the vane position / swing. Accepts a vane string (auto/1..5/swing) when
-        caps are known, or the plain on/off pair otherwise."""
-
-        try:
-            if swing_mode in HA_TO_MA_VANE:
-                vane_mode = HA_TO_MA_VANE[swing_mode]
-            elif swing_mode == SWING_ON:
-                vane_mode = MAVaneMode.SWING
-            else:
-                vane_mode = MAVaneMode.AUTO
-            await self.coordinator.async_set_vane_mode(vane_mode)
-        except MAException as ex:
-            raise ServiceValidationError(f"Failed to set swing mode: {ex}") from ex
-
-    async def async_set_preset_mode(self, preset_mode: str) -> None:
-        """Set HOLD (keep the current setpoint / suspend the schedule). Only offered on
-        units whose capability blob advertises hold support."""
-
-        try:
-            await self.coordinator.async_set_hold(preset_mode == PRESET_HOLD)
-        except MAException as ex:
-            raise ServiceValidationError(f"Failed to set preset: {ex}") from ex
