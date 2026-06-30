@@ -109,6 +109,10 @@ class Thermostat:
         self._keepalive_task: asyncio.Task | None = None
         self._last_status_hex: str | None = None
         self._expected_response_id: int | None = None
+        # Raw hex of the login / begin-session responses (LOGIN, 0x0003 device-info,
+        # 0x0401 operation-begin), captured to reverse the device-info / capability
+        # layout. These are device->phone responses (no PIN). Empty until a login runs.
+        self._login_responses: dict[str, str] = {}
 
     @property
     def is_connected(self) -> bool:
@@ -181,6 +185,13 @@ class Thermostat:
         """Raw hex of the most recent STATUS response (full frame for analysis)."""
 
         return self._last_status_hex
+
+    @property
+    def last_login_responses(self) -> dict[str, str]:
+        """Raw hex of the login / begin-session responses (for protocol RE: the
+        device-info / capability layout). Empty until a login completes."""
+
+        return dict(self._login_responses)
 
     async def async_connect(self) -> None:
         """Connect to the thermostat.
@@ -334,15 +345,16 @@ class Thermostat:
         """
 
         request = _MAAuthenticatedRequest(message_type=_MAMessageType.LOGIN_REQUEST, request_flag=0x01, pin=pin)
-        await self._async_write_request(request)
+        self._login_responses["login"] = (await self._async_write_request(request)).hex()
 
-        # not sure what this does yet, but seems to be required
+        # 0x0003 — RE (MELRemo): L2 "begin session / device-info". Capture the response
+        # so we can reverse the device-info / capability layout (it was being discarded).
         request = _MAAuthenticatedRequest(message_type=_MAMessageType.UNKNOWN_1, request_flag=0x01, pin=pin)
-        await self._async_write_request(request)
+        self._login_responses["0x0003"] = (await self._async_write_request(request)).hex()
 
-        # not sure what this does yet, but seems to be required
+        # 0x0401 — RE (MELRemo): L2 "operation session begin".
         request = _MAAuthenticatedRequest(message_type=_MAMessageType.UNKNOWN_2, request_flag=0x01, pin=pin)
-        await self._async_write_request(request)
+        self._login_responses["0x0401"] = (await self._async_write_request(request)).hex()
 
     async def async_logout(self, pin: int) -> None:
         """Unknown messages at end of connection.

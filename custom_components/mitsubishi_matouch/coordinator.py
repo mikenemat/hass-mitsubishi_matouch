@@ -127,6 +127,14 @@ class MACoordinator(DataUpdateCoordinator):
         return self._thermostat.software_version
 
     @property
+    def login_responses(self) -> dict[str, str]:
+        """Raw login/begin-session response hex, surfaced in diagnostics so the
+        device-info / capability frame layout can be reverse-engineered from real
+        bytes before a parser is written."""
+
+        return self._thermostat.last_login_responses
+
+    @property
     def reconnects(self) -> int:
         """Reconnects since startup (successful connects after the first)."""
 

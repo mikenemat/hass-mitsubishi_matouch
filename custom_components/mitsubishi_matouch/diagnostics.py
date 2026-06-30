@@ -45,6 +45,7 @@ async def async_get_config_entry_diagnostics(
                 "last_poll_duration_ms": round(last_poll * 1000) if last_poll is not None else None,
                 "active_proxy": coordinator.active_proxy,
                 "active_rssi": coordinator.active_rssi,
+                "login_responses": coordinator.login_responses,
                 "recent_telemetry": telemetry.recent(coordinator.mac_address) if telemetry else [],
             }
         )

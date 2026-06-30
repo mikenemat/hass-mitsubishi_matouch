@@ -4,6 +4,20 @@ This is a hardened fork of [cyaneous/hass-mitsubishi_matouch](https://github.com
 focused on running several MA Touch (PAR-CT01MAU) thermostats reliably over ESP32
 Bluetooth proxies, 24/7.
 
+## 0.14.10
+
+- **Fix: tolerate the `0xFFFF` "not set" temperature sentinel.** The device sends
+  `0xFFFF` for a setpoint/limit a given unit or mode doesn't use; decoding it did
+  `float("ffff")` → ValueError, which failed the whole status parse and dropped the unit
+  offline. It now decodes to `None` and every consumer guards it. Latent today but a
+  real crash for some configs.
+- **Internal (RE groundwork): capture the login / begin-session responses** (`0x0003`
+  device-info and `0x0401`) into **Download Diagnostics**. These were discarded;
+  surfacing the raw bytes lets the device-info / capability frame layout be reverse-
+  engineered from real hardware before a parser is written — the first step toward
+  capability detection (only exposing controls a unit supports), model/firmware info,
+  and the other MELRemo-derived features. No user-facing change yet.
+
 ## 0.14.9
 
 - **Converge temperature handling on the MELRemo app as the single source of truth.**
