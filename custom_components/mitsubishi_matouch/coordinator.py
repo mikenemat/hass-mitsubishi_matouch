@@ -113,6 +113,7 @@ class MACoordinator(DataUpdateCoordinator):
         self._target_operation_mode: MAOperationMode | None = None
         self._target_fan_mode: MAFanMode | None = None
         self._target_vane_mode: MAVaneMode | None = None
+        self._target_hold: bool | None = None
 
     @property
     def firmware_version(self) ->  str | None:
@@ -421,6 +422,14 @@ class MACoordinator(DataUpdateCoordinator):
                 self._target_vane_mode = None
                 raise
 
+        if (hold := self._target_hold) is not None:
+            try:
+                await self._thermostat.async_set_hold(hold)
+                self._target_hold = None
+            except MAControlRequestFailedException:
+                self._target_hold = None
+                raise
+
         return await self._thermostat.async_get_status()
 
     async def _async_update_data(self) -> Status:
@@ -537,7 +546,7 @@ class MACoordinator(DataUpdateCoordinator):
     def _apply_pending_targets_to_status(self, status: Status) -> Status:
         """Overlay queued control targets on fetched status to avoid UI bounce-back."""
 
-        changes: dict[str, float | MAOperationMode | MAFanMode | MAVaneMode] = {}
+        changes: dict[str, float | bool | MAOperationMode | MAFanMode | MAVaneMode] = {}
 
         if self._target_heat_setpoint is not None:
             changes["heat_setpoint"] = self._target_heat_setpoint
@@ -549,6 +558,8 @@ class MACoordinator(DataUpdateCoordinator):
             changes["fan_mode"] = self._target_fan_mode
         if self._target_vane_mode is not None:
             changes["vane_mode"] = self._target_vane_mode
+        if self._target_hold is not None:
+            changes["hold"] = self._target_hold
 
         if not changes:
             return status
@@ -564,6 +575,7 @@ class MACoordinator(DataUpdateCoordinator):
         self._target_operation_mode = None
         self._target_fan_mode = None
         self._target_vane_mode = None
+        self._target_hold = None
 
     def _raise_command_error(self) -> None:
         """Raise a clear error after a control attempt that did NOT apply, so the
@@ -631,6 +643,12 @@ class MACoordinator(DataUpdateCoordinator):
 
         self._target_vane_mode = vane_mode
         await self._async_apply_command(vane_mode=vane_mode)
+
+    async def async_set_hold(self, on: bool) -> None:
+        """Sets HOLD (keep the current setpoint / suspend schedule)."""
+
+        self._target_hold = on
+        await self._async_apply_command(hold=on)
 
     async def async_close_connection(self) -> None:
         """Disconnect the persistent BLE connection (called on unload)."""

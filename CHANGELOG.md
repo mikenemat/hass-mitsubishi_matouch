@@ -4,6 +4,16 @@ This is a hardened fork of [cyaneous/hass-mitsubishi_matouch](https://github.com
 focused on running several MA Touch (PAR-CT01MAU) thermostats reliably over ESP32
 Bluetooth proxies, 24/7.
 
+## 0.14.11
+
+- **New: HOLD switch — the first MELRemo-derived control axis.** Each thermostat gets a
+  **Hold** switch (keep the current setpoint / suspend the schedule), driven through the
+  extended control frame. It's optimistic with the same command-confirm + revert as the
+  other controls, and greys out when the unit is unreachable. The remaining axes
+  (vent / louver / left-right vane / Move-Eye) share the same protocol layer and follow
+  once validated on hardware and capability-gated. HOLD is the first to ship because the
+  device reports it back in the status frame, so it can be read, confirmed, and reverted.
+
 ## 0.14.10
 
 - **Fix: tolerate the `0xFFFF` "not set" temperature sentinel.** The device sends
