@@ -59,6 +59,18 @@ __all__ = ["Thermostat"]
 _LOGGER = logging.getLogger(__name__)
 
 
+class _RawRequest:
+    """Minimal request wrapper for the debug/RE raw-send path: an explicit message_type
+    plus pre-built body bytes (message_type LE + request_flag + payload)."""
+
+    def __init__(self, message_type: int, body: bytes) -> None:
+        self.message_type = message_type
+        self._body = body
+
+    def to_bytes(self) -> bytes:
+        return self._body
+
+
 class Thermostat:
     """Representation of a Mitsubishi MA Touch thermostat."""
 
@@ -437,6 +449,16 @@ class Thermostat:
         request = _MAStatusRequest(message_type=_MAMessageType.UNKNOWN_1, request_flag=0x00)
         return await self._async_write_request(request)
 
+    async def async_send_raw_request(self, message_type: int, request_flag: int = 0x00, payload: bytes = b"") -> bytes:
+        """DEBUG / RE ONLY: send one arbitrary request and return the raw response
+        payload, with NO validation. Off the login/poll path — used to crack new-command
+        framings against a single unit. A malformed request fails THIS call only (at most
+        one reconnect); it cannot loop, because it is never re-issued automatically.
+        """
+
+        body = (message_type & 0xFFFF).to_bytes(2, "little") + bytes([request_flag & 0xFF]) + payload
+        return await self._async_write_request(_RawRequest(message_type, body), validate=False)
+
     async def async_set_cool_setpoint(self, temperature: float) -> None:
         """Set the heating setpoint temperature.
 
@@ -682,7 +704,7 @@ class Thermostat:
             except TimeoutError as ex:
                 raise MATimeoutException("Timeout during read") from ex
 
-    async def _async_write_request(self, request: _MARequest) -> bytes:
+    async def _async_write_request(self, request: _MARequest, validate: bool = True) -> bytes:
         """Write a request to the thermostat.
 
         Args:
@@ -731,6 +753,10 @@ class Thermostat:
 
         try:
             response_bytes = await asyncio.wait_for(self._response_future, self._response_timeout)
+            if not validate:
+                # DEBUG/RE path: return the raw assembled response without the
+                # message-type / result checks (so unexpected replies are observable).
+                return response_bytes
             response_header = _MAResponse.from_bytes(response_bytes)
             if response_header.message_type != request.message_type & 0xff:
                 raise MAResponseException(f"Incorrect response message type received: {response_header.message_type}")

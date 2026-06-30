@@ -4,6 +4,17 @@ This is a hardened fork of [cyaneous/hass-mitsubishi_matouch](https://github.com
 focused on running several MA Touch (PAR-CT01MAU) thermostats reliably over ESP32
 Bluetooth proxies, 24/7.
 
+## 0.14.15
+
+- **Add a safe, on-demand `send_raw_request` debug service (RE tooling).** Sends ONE
+  arbitrary BLE request to a single thermostat (by MAC) and returns the raw response,
+  with no validation, **off the login/poll path** — so a malformed request fails only
+  that one call (at most one reconnect) and structurally cannot loop the way the
+  v0.14.12 login-path fetch did. This is the foundation for cracking new-command
+  framings (device-info/capability, fault history, energy) safely, one isolated shot at
+  a time against one unit. No automatic use; nothing on the normal connection path
+  changed.
+
 ## 0.14.14
 
 - **Remove the HOLD switch.** Hardware validation (Theater) showed it's a no-op on these

@@ -51,6 +51,20 @@ GET_TELEMETRY_SCHEMA = vol.Schema(
     }
 )
 
+# DEBUG / RE ONLY: send one raw BLE request to a single thermostat and return the raw
+# response. Off the login/poll path, so a malformed request fails only that one call
+# (at most one reconnect) and can never loop. Used to crack new-command framings
+# (device-info, fault history, energy) against ONE unit at a time.
+SERVICE_SEND_RAW_REQUEST = "send_raw_request"
+SEND_RAW_REQUEST_SCHEMA = vol.Schema(
+    {
+        vol.Required("mac"): cv.string,
+        vol.Required("message_type"): vol.Coerce(int),
+        vol.Optional("request_flag", default=0): vol.All(vol.Coerce(int), vol.Range(min=0, max=255)),
+        vol.Optional("payload", default=""): cv.string,
+    }
+)
+
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Register integration-level services (telemetry export for R&D)."""
@@ -72,6 +86,40 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         SERVICE_GET_TELEMETRY,
         _get_telemetry,
         schema=GET_TELEMETRY_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
+    )
+
+    async def _send_raw_request(call: ServiceCall) -> ServiceResponse:
+        """DEBUG/RE: send one raw request to the single thermostat matching `mac`."""
+
+        target = format_mac(call.data["mac"])
+        coordinator = None
+        for entry in hass.config_entries.async_entries(DOMAIN):
+            rt = getattr(entry, "runtime_data", None)
+            if rt is None:
+                continue
+            coordinator = next(
+                (c for c in rt.coordinators.values() if format_mac(c.mac_address) == target),
+                None,
+            )
+            if coordinator is not None:
+                break
+        if coordinator is None:
+            return {"error": f"no thermostat for mac {call.data['mac']}"}
+        try:
+            payload = bytes.fromhex(call.data["payload"]) if call.data["payload"] else b""
+            resp = await coordinator.async_send_raw_request(
+                call.data["message_type"], call.data["request_flag"], payload
+            )
+            return {"mac": coordinator.mac_address, "len": len(resp), "response_hex": resp.hex()}
+        except Exception as ex:  # noqa: BLE001 - surface any error as data, never raise
+            return {"mac": coordinator.mac_address, "error": str(ex)}
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_SEND_RAW_REQUEST,
+        _send_raw_request,
+        schema=SEND_RAW_REQUEST_SCHEMA,
         supports_response=SupportsResponse.ONLY,
     )
     return True

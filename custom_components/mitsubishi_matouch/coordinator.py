@@ -656,6 +656,12 @@ class MACoordinator(DataUpdateCoordinator):
         self._target_hold = on
         await self._async_apply_command(hold=on)
 
+    async def async_send_raw_request(self, message_type: int, request_flag: int, payload: bytes) -> bytes:
+        """DEBUG / RE ONLY: forward one raw request to the thermostat and return the raw
+        response (see Thermostat.async_send_raw_request). Off the poll path."""
+
+        return await self._thermostat.async_send_raw_request(message_type, request_flag, payload)
+
     async def async_close_connection(self) -> None:
         """Disconnect the persistent BLE connection (called on unload)."""
 
