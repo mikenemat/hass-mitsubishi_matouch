@@ -4,6 +4,18 @@ This is a hardened fork of [cyaneous/hass-mitsubishi_matouch](https://github.com
 focused on running several MA Touch (PAR-CT01MAU) thermostats reliably over ESP32
 Bluetooth proxies, 24/7.
 
+## 0.14.8
+
+- **Fix room temperature again — use the controller's lookup table, not truncation.**
+  0.14.7 replaced round-half-up with truncation; reverse-engineering the official
+  **MELRemo app (v4.2.2)** proved the controller converts BOTH setpoint and room temp
+  through one nonlinear lookup table, and room temp is no exception. Truncation only
+  matched in the 20–25 °C band (where the table happens to equal `int(c*9/5+32)`); it
+  read **1 °F low below 20 °C and at/above 25.5 °C** (2 °F low at 30.5 °C). Room temp
+  now uses the full 0–40 °C controller table (`_ROOM_C_TO_F`), which equals the setpoint
+  table in the overlap and matches the physical display at every value. °C systems are
+  unaffected (passthrough). Locked with tests incl. the previously-wrong points.
+
 ## 0.14.7
 
 - **Fix room (current) temperature reading ~1°F high.** `current_temperature` was

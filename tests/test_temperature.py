@@ -57,15 +57,33 @@ def test_double_steps():
     assert t.setpoint_f_to_c(69) - t.setpoint_f_to_c(68) == 1.0
 
 
-def test_room_truncates_to_match_controller():
-    # The controller TRUNCATES the linear conversion (drops the fraction) for room
-    # temp — verified live against this site's units (wall display vs decoded 0.5°C
-    # sensor value). NOT round-to-nearest, NOT half-up, NOT the setpoint table.
-    assert t.room_c_to_f(21.0) == 69.0  # 69.8 -> 69
-    assert t.room_c_to_f(22.0) == 71.0  # 71.6 -> 71 (round-to-nearest would give 72)
-    assert t.room_c_to_f(22.5) == 72.0  # 72.5 -> 72 (half-up would give 73)
-    assert t.room_c_to_f(23.0) == 73.0  # 73.4 -> 73 (matches; no offset at this value)
-    assert t.room_c_to_f(20.0) == 68.0  # exact 68.0 (no float-undershoot truncation)
+def test_room_uses_controller_table():
+    # Room/current temp uses the controller's lookup table (same as setpoints),
+    # confirmed by decompiling MELRemo. NOT linear, NOT floor/truncation, NOT round.
+    # Comfort band (also matched the old truncation + live wall readings):
+    assert t.room_c_to_f(21.0) == 69
+    assert t.room_c_to_f(22.0) == 71
+    assert t.room_c_to_f(22.5) == 72
+    assert t.room_c_to_f(23.0) == 73
+    # Points where the old truncation `int(c*9/5+32)` was WRONG (read 1 °F low):
+    assert t.room_c_to_f(18.0) == 65   # truncation gave 64
+    assert t.room_c_to_f(18.5) == 66   # truncation gave 65
+    assert t.room_c_to_f(19.0) == 67   # truncation gave 66 (double-step 19.0&19.5->67)
+    assert t.room_c_to_f(25.5) == 78   # truncation gave 77
+    assert t.room_c_to_f(30.0) == 87   # truncation gave 86
+    assert t.room_c_to_f(30.5) == 88   # truncation gave 86 (off by 2)
+    # Non-0.5 input snaps to the 0.5 °C grid the device reports on:
+    assert t.room_c_to_f(22.3) == 72   # snaps to 22.5 -> 72
+    # Out-of-range clamps to the table ends (implausible indoors, but no crash):
+    assert t.room_c_to_f(-5.0) == 32
+    assert t.room_c_to_f(99.0) == 104
+
+
+def test_room_table_superset_matches_setpoint_table():
+    # The full room table must equal the setpoint table everywhere they overlap
+    # (16.0–30.5 °C) — they are the SAME controller table, per MELRemo.
+    for f, c in STANDARD.items():
+        assert t._ROOM_C_TO_F[c] == f, (c, f)
 
 
 def test_celsius_passthrough_is_identity():
