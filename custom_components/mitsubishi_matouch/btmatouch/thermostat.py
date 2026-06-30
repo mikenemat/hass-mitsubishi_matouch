@@ -25,6 +25,7 @@ from ._structures import (
     _MAControlRequest,
     _MAControlResponse,
 )
+from .capabilities import Capabilities, parse_device_info
 from .const import (
     DEFAULT_MAX_CONNECT_RETRIES,
     DEFAULT_COMMAND_TIMEOUT,
@@ -139,6 +140,9 @@ class Thermostat:
         # Raw hex of the device-info / capability response (see async_get_device_info),
         # captured so the 76-byte capability layout is parsed from real bytes.
         self._last_device_info_hex: str | None = None
+        # Parsed per-unit capabilities (static hardware facts), populated by the most
+        # recent successful async_get_device_info(). None until first fetched.
+        self._capabilities: Capabilities | None = None
 
     @property
     def is_connected(self) -> bool:
@@ -225,6 +229,13 @@ class Thermostat:
         None until the first login. Used to build/validate the capability parser."""
 
         return self._last_device_info_hex
+
+    @property
+    def capabilities(self) -> Capabilities | None:
+        """Parsed per-unit capabilities from the last device-info fetch (None until
+        async_get_device_info has succeeded once)."""
+
+        return self._capabilities
 
     async def async_connect(self) -> None:
         """Connect to the thermostat.
@@ -505,6 +516,15 @@ class Thermostat:
         await _send("data", _MAStatusRequest(
             message_type=_MAMessageType.DEVICE_INFO_REQUEST, request_flag=0x00))
         self._last_device_info_hex = out.get("data")
+        # Parse the capability blob into structured per-unit capabilities.
+        data_hex = out.get("data")
+        if data_hex and not data_hex.startswith("error"):
+            try:
+                self._capabilities = parse_device_info(bytes.fromhex(data_hex))
+                out["caps"] = "ok"
+            except Exception as ex:  # noqa: BLE001 - never let a parse error fail the fetch
+                out["caps"] = f"parse error: {ex}"
+                _LOGGER.debug("[%s] capability parse failed: %s", self._mac_address, ex)
         # end session 3 — clean teardown (then the coordinator disconnects).
         await _send("end3", _MAAuthenticatedRequest(
             message_type=_MAMessageType.END_SESSION_3, request_flag=0x01, pin=pin))

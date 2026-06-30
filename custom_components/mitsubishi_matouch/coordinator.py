@@ -152,6 +152,12 @@ class MACoordinator(DataUpdateCoordinator):
         return self._thermostat.last_device_info_hex
 
     @property
+    def capabilities(self):
+        """Parsed per-unit capabilities from the last device-info fetch (or None)."""
+
+        return self._thermostat.capabilities
+
+    @property
     def reconnects(self) -> int:
         """Reconnects since startup (successful connects after the first)."""
 
