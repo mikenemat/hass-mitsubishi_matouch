@@ -41,6 +41,7 @@ _LOGGER = logging.getLogger(__name__)
 PLATFORMS = [
     Platform.CLIMATE,
     Platform.SENSOR,
+    Platform.BINARY_SENSOR,
     Platform.SWITCH,
     Platform.SELECT,
 ]
@@ -558,6 +559,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: MAConfigEntry) -> bool:
                 coordinator.raise_wedged_issue()
             else:
                 coordinator.clear_wedged_issue()
+            # Thermostat fault: the device is connected + authenticated but persistently
+            # rejecting commands with a device error (stuck on an error/startup screen).
+            # No sibling gating — the device answered, so it's a real unit-side fault, not
+            # a systemic proxy/Bluetooth problem.
+            if coordinator.is_device_faulted:
+                coordinator.raise_device_fault_issue()
+            else:
+                coordinator.clear_device_fault_issue()
 
     entry.async_on_unload(
         async_track_time_interval(hass, _availability_tick, timedelta(seconds=AVAILABILITY_TICK_INTERVAL))
@@ -608,6 +617,7 @@ async def _stop_subentry(hass: HomeAssistant, entry: MAConfigEntry, subentry_id:
     if coordinator is not None:
         coordinator.clear_auth_issue()
         coordinator.clear_wedged_issue()
+        coordinator.clear_device_fault_issue()
         await coordinator.async_shutdown()
         await coordinator.async_close_connection()
 

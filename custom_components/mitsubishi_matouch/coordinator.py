@@ -18,12 +18,12 @@ from bleak.backends.device import BLEDevice
 
 from .btmatouch.const import MAOperationMode, MAFanMode, MAVaneMode
 from .btmatouch.thermostat import Status, Thermostat
-from .btmatouch.exceptions import MAException, MAAuthException, MAControlRequestFailedException
+from .btmatouch.exceptions import MAException, MAAuthException, MAControlRequestFailedException, MADeviceErrorException
 
 from .models import MAConfigEntry
 from .proxy_balancer import MAProxyBalancer
 from .telemetry import MATelemetryLog
-from .const import DOMAIN, MAX_BACKOFF_INTERVAL, WEDGED_UNIT_THRESHOLD, SIGNAL_CAPS_LOADED
+from .const import DOMAIN, MAX_BACKOFF_INTERVAL, WEDGED_UNIT_THRESHOLD, SIGNAL_CAPS_LOADED, DEVICE_FAULT_THRESHOLD
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -103,6 +103,15 @@ class MACoordinator(DataUpdateCoordinator):
         self._wedged_issue_id = f"wedged_{address}"
         self._wedged_issue_active = False
         self._discoverable_fail_since: float | None = None
+        # "Thermostat fault" Repairs issue: the unit is connected + authenticated but
+        # answers operation/settings requests with ERROR_FROM_DEVICE (0x09) — stuck on an
+        # error/startup screen. _device_error_since marks when that streak began (None when
+        # a poll succeeds); is_device_faulted trips once it exceeds DEVICE_FAULT_THRESHOLD.
+        # _device_error_detail holds the device's trailing error-detail byte (e.g. 0x78).
+        self._device_fault_issue_id = f"device_fault_{address}"
+        self._device_fault_issue_active = False
+        self._device_error_since: float | None = None
+        self._device_error_detail: int | None = None
         self._prev_connect_count = 0
         self._prev_disconnect_count = 0
         self._prev_status_hex: str | None = None
@@ -247,6 +256,26 @@ class MACoordinator(DataUpdateCoordinator):
             return False
         return (time.monotonic() - self._discoverable_fail_since) > WEDGED_UNIT_THRESHOLD
 
+    @property
+    def is_device_faulted(self) -> bool:
+        """True when the thermostat is connected + authenticated but has been rejecting
+        operation/settings requests with ERROR_FROM_DEVICE (0x09) for longer than
+        DEVICE_FAULT_THRESHOLD — i.e. it's stuck on an error/startup screen (a fault),
+        not merely a transient on-device menu interaction. Distinct from 'wedged' (which
+        is a connect failure): here the device answered, so it's a real device-side fault.
+        """
+
+        if self._device_error_since is None:
+            return False
+        return (time.monotonic() - self._device_error_since) > DEVICE_FAULT_THRESHOLD
+
+    @property
+    def device_fault_detail(self) -> int | None:
+        """The device's trailing error-detail byte from the last 0x09 response (e.g. 0x78
+        for the observed E4 startup fault), or None when not faulted."""
+
+        return self._device_error_detail if self._device_error_since is not None else None
+
     @callback
     def _clear_active_proxy(self) -> None:
         """Forget the serving proxy once the link is down so the diagnostic
@@ -364,6 +393,34 @@ class MACoordinator(DataUpdateCoordinator):
 
         ir.async_delete_issue(self.hass, DOMAIN, self._wedged_issue_id)
         self._wedged_issue_active = False
+
+    @callback
+    def raise_device_fault_issue(self) -> None:
+        """Surface a Repairs issue: this thermostat is connected but reporting a device
+        error (stuck on an error/startup screen), so it can't be operated. Driven by the
+        availability tick once is_device_faulted trips. Idempotent."""
+
+        if self._device_fault_issue_active:
+            return
+        ir.async_create_issue(
+            self.hass,
+            DOMAIN,
+            self._device_fault_issue_id,
+            is_fixable=False,
+            severity=ir.IssueSeverity.ERROR,
+            translation_key="device_fault",
+            translation_placeholders={"name": self.device_name},
+        )
+        self._device_fault_issue_active = True
+
+    @callback
+    def clear_device_fault_issue(self) -> None:
+        """Remove the thermostat-fault Repairs issue (on recovery or removal). Safe to
+        call when none exists (no-op), so it also clears a stale issue from a previous
+        coordinator instance across a reload."""
+
+        ir.async_delete_issue(self.hass, DOMAIN, self._device_fault_issue_id)
+        self._device_fault_issue_active = False
 
     @callback
     def _note_connection_source(self) -> None:
@@ -621,6 +678,22 @@ class MACoordinator(DataUpdateCoordinator):
             await self._record_poll(False, error="poll_timeout", detail=str(ex))
             self._apply_backoff()
             raise UpdateFailed(f"Poll timed out: {ex}") from ex
+        except MADeviceErrorException as ex:
+            # The device is connected + authenticated but rejected the request with
+            # ERROR_FROM_DEVICE (0x09) — stuck on an error/startup screen, or transiently
+            # in the on-device menus. Drop the link + back off like a link error, but track
+            # it as its OWN streak (device_error, NOT the wedged streak) so a persistent
+            # fault raises the thermostat-fault Repairs notice. The device answered, so
+            # this is never a systemic proxy issue.
+            await self._thermostat.async_close()
+            self._clear_active_proxy()
+            self._clear_pending_targets()
+            if self._device_error_since is None:
+                self._device_error_since = time.monotonic()
+            self._device_error_detail = ex.detail
+            await self._record_poll(False, error="device_error", detail=str(ex))
+            self._apply_backoff()
+            raise UpdateFailed(f"Device reported a fault: {ex}") from ex
         except MAException as ex:
             # Any other protocol/link error: drop the connection so the next
             # poll reconnects cleanly, and back off the cadence during an outage.
@@ -830,8 +903,10 @@ class MACoordinator(DataUpdateCoordinator):
             self._last_success_monotonic = time.monotonic()
             self._last_fail_persist = None
             self._last_fail_error = None
-            # Link is healthy again: clear the wedged-radio streak (see is_wedged).
+            # Link is healthy again: clear the wedged-radio + device-fault streaks.
             self._discoverable_fail_since = None
+            self._device_error_since = None
+            self._device_error_detail = None
             persist = self._log_polls
         else:
             error = extra.get("error")
@@ -846,6 +921,11 @@ class MACoordinator(DataUpdateCoordinator):
                     self._discoverable_fail_since = now
             else:
                 self._discoverable_fail_since = None
+            # The device-fault streak persists only across consecutive device errors; any
+            # other failure (link/auth/timeout/offline) means it's a different problem now.
+            if error != "device_error":
+                self._device_error_since = None
+                self._device_error_detail = None
             persist = (
                 error != self._last_fail_error
                 or self._last_fail_persist is None

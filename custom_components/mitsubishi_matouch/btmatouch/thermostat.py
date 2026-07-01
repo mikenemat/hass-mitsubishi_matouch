@@ -52,6 +52,7 @@ from .exceptions import (
     MAAuthException,
     MAStateException,
     MATimeoutException,
+    MADeviceErrorException,
 )
 from .models import Status
 
@@ -887,7 +888,17 @@ class Thermostat:
                 case _MAResult.SUCCESS:
                     return response_bytes
                 case _MAResult.IN_MENUS:
-                    raise MAResponseException(f"Failure result received: {response_header.result} - thermostat in menus?")
+                    # 0x09 = ERROR_FROM_DEVICE: the device is connected + authenticated
+                    # but rejects this session/data request. Happens transiently while the
+                    # user is in the on-device menus, and persistently when the unit is
+                    # stuck on an error/startup screen (a fault). Surface it distinctly so
+                    # the coordinator can tell "device error" from a link failure and, if it
+                    # persists, raise the thermostat-fault Repairs notice. The trailing byte
+                    # is the device's error detail (e.g. 0x78 for the observed E4 fault).
+                    detail = response_bytes[-1] if len(response_bytes) >= 3 else None
+                    raise MADeviceErrorException(
+                        f"Device error (result 0x09, detail {detail})", detail=detail
+                    )
                 case _MAResult.RESTART_JOB:
                     # 0x02: the device asked to restart the job (a transient state /
                     # out-of-order-session rejection) — NOT a wrong PIN. Surface it as a

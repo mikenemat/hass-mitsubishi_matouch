@@ -134,3 +134,11 @@ AVAILABILITY_TICK_INTERVAL = 15
 # (and above the exponential backoff) so an ordinary recoverable hiccup never trips it;
 # only a genuinely stuck unit (advertising yet unjoinable for this long) does.
 WEDGED_UNIT_THRESHOLD = 600
+
+# How long the device must keep answering operation/settings requests with
+# ERROR_FROM_DEVICE (result 0x09) before we raise the "thermostat fault" Repairs notice.
+# The device is connected and authenticates (so this isn't a link/wedge issue) but
+# rejects everything — a unit stuck on an error/startup screen. Long enough that a user
+# briefly in the on-device menus (which also returns 0x09) doesn't trip it; it clears the
+# moment a poll succeeds.
+DEVICE_FAULT_THRESHOLD = 180

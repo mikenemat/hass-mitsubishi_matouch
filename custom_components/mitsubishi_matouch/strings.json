@@ -86,6 +86,10 @@
     "wedged": {
       "title": "{name}: reachable but won't connect",
       "description": "Home Assistant can see **{name}** advertising over Bluetooth (a proxy is in range), but every attempt to connect to it has failed for several minutes — so it can't be read or controlled. Your other thermostats are connecting normally.\n\nThis almost always means the thermostat's Bluetooth radio has wedged. **Power-cycle the thermostat** — cut power to it for about 30 seconds (e.g. flip the breaker for that air handler, or disconnect and reseat the controller) — to reset its radio. It should reconnect within a minute.\n\nIf power-cycling doesn't help, make sure a Bluetooth proxy is close enough for a solid signal. This alert clears automatically once the thermostat reconnects."
+    },
+    "device_fault": {
+      "title": "{name}: thermostat reporting a fault",
+      "description": "**{name}** connects over Bluetooth and authenticates, but it's rejecting every operation and settings command with a device error — it appears to be stuck, often on a startup/error screen showing a check code (for example **E4**). It can't be read or controlled until the fault is cleared.\n\n**Look at the thermostat's display** and note the error/check code shown, then **power-cycle the unit** (cut power for about 30 seconds — e.g. the air-handler breaker) and address the underlying fault. A startup fault that halts the unit isn't stored in the readable error log, so the code on the display is the one to go by.\n\nThis alert clears automatically once the thermostat operates normally again."
     }
   },
   "entity": {
