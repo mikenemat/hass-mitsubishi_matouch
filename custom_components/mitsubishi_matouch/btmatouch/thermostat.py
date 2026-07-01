@@ -972,9 +972,21 @@ class Thermostat:
         # TODO: do we need further checks here?
 
     def _crc_sum(self, frame: bytes) -> int:
-        """Calculate frame CRC."""
+        """Frame checksum: the 16-bit little-endian sum of every byte before the
+        2-byte checksum field.
 
-        return sum(frame) & 0xff
+        Must be 16-bit to match what the DEVICE validates — the inbound check in
+        _on_message_received uses `& 0xFFFF` and is verified live on CT01MAU + CT01MA.
+        This was previously truncated to `& 0xff`, which happened to work only because
+        ordinary frames (status, control, USER login) have byte-sums <= 255, so the
+        high byte is 0 either way. Any frame whose byte-sum exceeds 255 shipped a wrong
+        high byte and the device silently DROPPED it with no reply — which looked like an
+        auth/comms timeout. That is exactly what blocked admin/service login: the constant
+        `0x32BC` user marker (0xbc + 0x32 = 238) plus a PIN pushes the sum well over 255.
+        Frames with sum <= 255 are byte-identical to before, so this is backward-compatible.
+        """
+
+        return sum(frame) & 0xFFFF
 
     def _cancel_keepalive(self) -> None:
         """Stop the keepalive task if running."""

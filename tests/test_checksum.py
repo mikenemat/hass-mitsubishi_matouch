@@ -43,6 +43,13 @@ CAPTURED = {
     # An outbound STATUS request we built ourselves (sum < 256, so it doubles as
     # a check that send/receive agree on the formula for small frames).
     "SND-request": "0600040502001100",
+    # An outbound ADMIN begin-0 login frame (byte-sum 559 > 255). This is the frame
+    # class that exposed the outbound-checksum bug: thermostat._crc_sum truncated to
+    # `& 0xff` and shipped crc "2f 00", but the correct 16-bit crc is "2f 02", so the
+    # device silently dropped every admin/service login. Locks the 16-bit rule for
+    # large-sum outbound frames. len=0b00, id=00, body=01 00 02 bc 32 01 99 99 (ADMIN,
+    # user_pw 0x32BC, license_type 1, license_pw 0x9999), crc=022f LE.
+    "SND-admin-login": "0b0000010002bc320199992f02",
 }
 
 
@@ -71,3 +78,19 @@ def test_any_single_bit_flip_is_caught():
 
 def test_runt_frame_is_rejected():
     assert not checksum_ok(b"\x06\x00")
+
+
+def test_large_sum_frame_needs_16bit_checksum():
+    """Regression for the outbound checksum bug: a frame whose byte-sum exceeds 255
+    MUST carry the full 16-bit checksum. An `& 0xff` truncation (the old
+    thermostat._crc_sum) would ship the wrong high byte and the device drops the
+    frame silently -- which is what blocked admin/service login."""
+    frame = bytes.fromhex(CAPTURED["SND-admin-login"])
+    body_sum = crc16le(frame)              # sum(all bytes before crc), 16-bit
+    assert body_sum > 0xFF, "sample must actually exceed the 8-bit range"
+    assert body_sum & 0xFF != body_sum, "8-bit truncation would change the value"
+    # The frame's stored checksum is the correct 16-bit value...
+    assert checksum_ok(frame)
+    # ...and an 8-bit-truncated checksum (the bug) would FAIL validation.
+    truncated = frame[:-2] + (body_sum & 0xFF).to_bytes(2, "little")
+    assert not checksum_ok(truncated)
