@@ -546,7 +546,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: MAConfigEntry) -> bool:
             return
         coordinators = list(rt.coordinators.values())
         for coordinator in coordinators:
-            if coordinator.data is not None and not coordinator.last_update_success:
+            # Re-evaluate a failing unit's entities so time-based state (card greying,
+            # the Fault sensor) refreshes. Normally gated on having had data (don't push a
+            # never-connected unit through the entities with no status), BUT a device-faulted
+            # unit may have NEVER polled successfully (data is None) — e.g. a startup fault —
+            # yet its Fault sensor must still flip on, so nudge those too.
+            if not coordinator.last_update_success and (
+                coordinator.data is not None or coordinator.is_device_faulted
+            ):
                 coordinator.async_update_listeners()
             # Wedged-radio Repairs notice: a unit that's been discoverable-but-
             # unjoinable for a sustained period (see MACoordinator.is_wedged). Gate it
