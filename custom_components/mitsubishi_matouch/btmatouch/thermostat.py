@@ -1099,9 +1099,16 @@ class Thermostat:
             if self._response_future is not None and not self._response_future.done():
                 self._response_future.set_result(payload)
             else:
-                _LOGGER.warning("[%s] Unsolicited message received, payload: %s", self._mac_address, payload.hex())
+                # Benign: a late/duplicate response arriving after its request already
+                # timed out or the link churned (common on weak links — see the reconnect
+                # storm in the wild). DEBUG, not WARNING: the actionable failure is the
+                # coordinator's "Error fetching … data" (ERROR); this would just flood.
+                _LOGGER.debug("[%s] Unsolicited message received, payload: %s", self._mac_address, payload.hex())
         except Exception as ex:  # noqa: BLE001 - must never escape the notify callback
-            _LOGGER.warning("[%s] Error processing received frame: %s", self._mac_address, ex)
+            # Frame-assembly desync (packet loss/reorder on a weak link). Self-recovering:
+            # we reset the buffer and fail any pending request below → the coordinator
+            # logs the poll failure at ERROR. DEBUG here to avoid per-packet WARNING spam.
+            _LOGGER.debug("[%s] Error processing received frame: %s", self._mac_address, ex)
             self._receive_length = 0
             self._receive_buffer = bytes(0)
             if self._response_future is not None and not self._response_future.done():

@@ -87,6 +87,9 @@ SENSORS: tuple[MASensorDescription, ...] = (
         device_class=SensorDeviceClass.DURATION,
         state_class=SensorStateClass.MEASUREMENT,
         entity_category=EntityCategory.DIAGNOSTIC,
+        # Monotonic counter → changes EVERY poll (~6 recorder rows/min/unit). Off by default
+        # so the general install isn't flooded; power users enable it for proxy characterization.
+        entity_registry_enabled_default=False,
         value_fn=lambda c: round(c.connection_uptime) if c.connection_uptime is not None else None,
     ),
     MASensorDescription(
@@ -110,6 +113,8 @@ SENSORS: tuple[MASensorDescription, ...] = (
         device_class=SensorDeviceClass.DURATION,
         state_class=SensorStateClass.MEASUREMENT,
         entity_category=EntityCategory.DIAGNOSTIC,
+        # Network jitter → a new value EVERY poll. Off by default (same rationale as uptime).
+        entity_registry_enabled_default=False,
         value_fn=lambda c: round(c.last_poll_duration * 1000) if c.last_poll_duration is not None else None,
     ),
     MASensorDescription(
