@@ -897,8 +897,11 @@ class Thermostat:
                     # is the device's error detail (e.g. 0x78 for the observed E4 fault).
                     detail = response_bytes[-1] if len(response_bytes) >= 3 else None
                     raise MADeviceErrorException(
-                        f"Device error (result 0x09, detail {detail})", detail=detail
+                        f"Device error (result 0x09, detail {detail})", result=0x09, detail=detail
                     )
+                case _MAResult.RETRY:
+                    # 0x08: device busy — a transient "try again" hint, not a fault.
+                    raise MAResponseException("Device busy (result 0x08, retry)")
                 case _MAResult.RESTART_JOB:
                     # 0x02: the device asked to restart the job (a transient state /
                     # out-of-order-session rejection) — NOT a wrong PIN. Surface it as a
@@ -908,7 +911,19 @@ class Thermostat:
                 case _MAResult.BAD_PIN:
                     raise MAAuthException("Failure result received: Incorrect PIN?")
                 case _:
-                    raise MAResponseException(f"Failure result received: {response_header.result}")
+                    # Any OTHER non-success result code = the device reporting an error it
+                    # can't continue from (a startup or other fault). Treat generically as a
+                    # device error (NOT limited to 0x09/E4), so ANY failed-startup condition
+                    # where we get an error code and can't proceed raises the fault notice
+                    # once it persists. SUCCESS/RETRY/RESTART/BAD_PIN are handled above.
+                    try:
+                        code = int(response_header.result)
+                    except (TypeError, ValueError):
+                        code = -1
+                    detail = response_bytes[-1] if len(response_bytes) >= 3 else None
+                    raise MADeviceErrorException(
+                        f"Device error (result 0x{code:02x}, detail {detail})", result=code, detail=detail
+                    )
         except TimeoutError as ex:
             raise MATimeoutException("Timeout while awaiting response") from ex
         except StreamError as ex:

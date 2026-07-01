@@ -55,12 +55,16 @@ class MAAuthException(MAException):
 
 
 class MADeviceErrorException(MAException):
-    """The device answered a session/data request with ERROR_FROM_DEVICE (result 0x09):
-    it is reachable and authenticates, but rejects operation/settings sessions. Seen when
-    the unit is stuck on an error/startup screen (a fault that blocks normal operation) or,
-    transiently, while the user is in the thermostat's on-device menus. Carries the raw
-    response so the trailing device-error detail byte (e.g. 0x78) can be surfaced."""
+    """The device answered a session/data request with an error result code it can't
+    continue from — it is reachable and authenticates, but rejects operation/settings
+    sessions. The canonical code is ERROR_FROM_DEVICE (0x09), but this also covers ANY
+    other non-success, non-transient, non-auth result code (a generic "startup/other
+    fault", not limited to one error like E4). Seen when the unit is stuck on an
+    error/startup screen, or transiently while the user is in the on-device menus.
+    Carries the result code and the trailing device-error detail byte (e.g. 0x78) for
+    surfacing/diagnostics."""
 
-    def __init__(self, message: str, detail: int | None = None) -> None:
+    def __init__(self, message: str, result: int | None = None, detail: int | None = None) -> None:
         super().__init__(message)
+        self.result = result
         self.detail = detail

@@ -111,6 +111,7 @@ class MACoordinator(DataUpdateCoordinator):
         self._device_fault_issue_id = f"device_fault_{address}"
         self._device_fault_issue_active = False
         self._device_error_since: float | None = None
+        self._device_error_result: int | None = None
         self._device_error_detail: int | None = None
         self._prev_connect_count = 0
         self._prev_disconnect_count = 0
@@ -271,10 +272,18 @@ class MACoordinator(DataUpdateCoordinator):
 
     @property
     def device_fault_detail(self) -> int | None:
-        """The device's trailing error-detail byte from the last 0x09 response (e.g. 0x78
-        for the observed E4 startup fault), or None when not faulted."""
+        """The device's trailing error-detail byte from the last device-error response
+        (e.g. 0x78 for the observed E4 startup fault), or None when not faulted."""
 
         return self._device_error_detail if self._device_error_since is not None else None
+
+    @property
+    def device_fault_result(self) -> int | None:
+        """The device error RESULT code that put the unit in the fault state (0x09
+        ERROR_FROM_DEVICE, or any other non-success/non-transient/non-auth code), or None
+        when not faulted."""
+
+        return self._device_error_result if self._device_error_since is not None else None
 
     @callback
     def _clear_active_proxy(self) -> None:
@@ -690,6 +699,7 @@ class MACoordinator(DataUpdateCoordinator):
             self._clear_pending_targets()
             if self._device_error_since is None:
                 self._device_error_since = time.monotonic()
+            self._device_error_result = ex.result
             self._device_error_detail = ex.detail
             await self._record_poll(False, error="device_error", detail=str(ex))
             self._apply_backoff()
@@ -906,6 +916,7 @@ class MACoordinator(DataUpdateCoordinator):
             # Link is healthy again: clear the wedged-radio + device-fault streaks.
             self._discoverable_fail_since = None
             self._device_error_since = None
+            self._device_error_result = None
             self._device_error_detail = None
             persist = self._log_polls
         else:
@@ -925,6 +936,7 @@ class MACoordinator(DataUpdateCoordinator):
             # other failure (link/auth/timeout/offline) means it's a different problem now.
             if error != "device_error":
                 self._device_error_since = None
+                self._device_error_result = None
                 self._device_error_detail = None
             persist = (
                 error != self._last_fail_error

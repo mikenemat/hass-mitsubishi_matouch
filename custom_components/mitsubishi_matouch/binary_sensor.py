@@ -85,13 +85,21 @@ class MAFaultSensor(CoordinatorEntity[MACoordinator], BinarySensorEntity):
 
     @property
     def extra_state_attributes(self) -> dict | None:
-        """Surface the device's raw error-detail byte (e.g. 0x78 for the E4 startup fault)
-        for diagnostics; None when not faulted."""
+        """Surface the device error result code + trailing detail byte (e.g. result 0x09,
+        detail 0x78 for the observed E4 startup fault) for diagnostics; None when not
+        faulted. The specific on-screen code (E4/E2/…) isn't in this response — it's on the
+        unit's display — so these are the raw BLE-visible error signals."""
 
-        detail = self.coordinator.device_fault_detail
-        if detail is None:
+        if not self.coordinator.is_device_faulted:
             return None
-        return {"error_detail": f"0x{detail:02x}"}
+        attrs: dict = {}
+        result = self.coordinator.device_fault_result
+        detail = self.coordinator.device_fault_detail
+        if result is not None:
+            attrs["error_result"] = f"0x{result:02x}"
+        if detail is not None:
+            attrs["error_detail"] = f"0x{detail:02x}"
+        return attrs or None
 
     @property
     def available(self) -> bool:
