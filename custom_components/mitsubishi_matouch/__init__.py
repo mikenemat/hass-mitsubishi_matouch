@@ -40,10 +40,10 @@ _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS = [
     Platform.CLIMATE,
+    # NOTE: no Platform.SELECT — vane moved back into the climate card as SWING_MODE.
     Platform.SENSOR,
     Platform.BINARY_SENSOR,
     Platform.SWITCH,
-    Platform.SELECT,
 ]
 
 SERVICE_GET_TELEMETRY = "get_telemetry"

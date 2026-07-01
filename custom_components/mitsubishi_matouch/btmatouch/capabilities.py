@@ -29,15 +29,17 @@ __all__ = [
     "VANE_AUTO", "VANE_SWING", "VANE_POSITION_LABELS",
 ]
 
-# Vane (vertical airflow) HA swing-mode labels. AUTHORITATIVE from the decompiled
-# MELRemo SDK (GeminiMobileData.Vane + WindDirection.toRequestValue/convertDirectionToVane):
-# the five fixed positions are FLAT (horizontal) -> DOWNWARD20 -> DOWNWARD60 ->
-# DOWNWARD80 -> DOWNWARD100 (fully down). Human-readable so the swing dropdown shows
-# airflow direction, not opaque indexes. The wire-value <-> label mapping lives in
+# Vane (vertical airflow) labels for the climate SWING_MODE control. AUTHORITATIVE from
+# the decompiled MELRemo SDK (GeminiMobileData.Vane + WindDirection.toRequestValue/
+# convertDirectionToVane): the five fixed positions are FLAT (horizontal) -> DOWNWARD20 ->
+# DOWNWARD60 -> DOWNWARD80 -> DOWNWARD100 (fully down). The fixed positions carry a "Vane"
+# prefix because HA hard-codes the control's header as "Swing mode" (not renamable) — so
+# the VALUE supplies the context, e.g. it reads "Swing mode: Vane down 60%". auto/swing are
+# left bare (they read fine under that header). The wire-value <-> label mapping lives in
 # const.MA_VANE_VALUE_TO_HA / HA_TO_MA_VANE; this list is positions 1..5 in order.
 VANE_AUTO = "auto"
 VANE_SWING = "swing"
-VANE_POSITION_LABELS = ["horizontal", "down 20%", "down 60%", "down 80%", "down 100%"]
+VANE_POSITION_LABELS = ["Vane horizontal", "Vane down 20%", "Vane down 60%", "Vane down 80%", "Vane down 100%"]
 
 # Response header length before the m0/i/a structure (phase 1 + L3 major/sub echo 2 +
 # result 2 + 1). Validated against the live CT01MA device-info response.

@@ -32,6 +32,8 @@ from .const import (
     HA_TO_MA_HVAC,
     MA_TO_HA_FAN,
     HA_TO_MA_FAN,
+    MA_VANE_VALUE_TO_HA,
+    HA_TO_MA_VANE,
     SIGNAL_NEW_THERMOSTAT,
     SUBENTRY_TYPE_THERMOSTAT,
 )
@@ -78,10 +80,11 @@ class MAClimate(CoordinatorEntity[MACoordinator], ClimateEntity):
     _attr_name = None
     _attr_translation_key = "matouch"
 
-    # Vane and Hold are exposed as DEDICATED entities (a "Vane" select + a "Hold" switch,
-    # created per-unit once capabilities are known) rather than the climate swing/preset —
-    # so the labels are correct (a fixed vane position isn't a "swing", and Hold reads as a
-    # plain on/off). The climate entity itself therefore carries no swing/preset feature.
+    # Vane is exposed IN the climate card via the SWING_MODE control (added dynamically
+    # once caps show the unit has a vane — see supported_features/swing_modes). HA hard-codes
+    # that control's header as "Swing mode", so the option VALUES carry a "Vane" prefix to
+    # supply context (reads "Swing mode: Vane down 60%"). Hold stays a dedicated switch: it's
+    # an on/off, and cramming a toggle into climate's "preset" slot is semantically wrong.
     _attr_supported_features = (
         ClimateEntityFeature.TARGET_TEMPERATURE
         | ClimateEntityFeature.TARGET_TEMPERATURE_RANGE
@@ -89,6 +92,15 @@ class MAClimate(CoordinatorEntity[MACoordinator], ClimateEntity):
         | ClimateEntityFeature.TURN_ON
         | ClimateEntityFeature.TURN_OFF
     )
+
+    @property
+    def supported_features(self) -> ClimateEntityFeature:
+        """Base features, plus SWING_MODE (vane) once caps confirm this unit has a vane.
+        Dynamic so a no-vane unit (vane=0) never shows an empty swing control."""
+        caps = self._caps
+        if caps is not None and caps.supports_swing:
+            return self._attr_supported_features | ClimateEntityFeature.SWING_MODE
+        return self._attr_supported_features
 
     def __init__(self, coordinator: MACoordinator) -> None:
         """Initialize the MA Touch climate entity."""
@@ -198,6 +210,16 @@ class MAClimate(CoordinatorEntity[MACoordinator], ClimateEntity):
         if caps is None:
             return list(HA_TO_MA_FAN.keys())
         return caps.fan_modes()
+
+    @property
+    def swing_modes(self) -> list[str] | None:
+        """Vane positions (auto / Vane horizontal / Vane down 20..100% / swing), or None
+        until caps load or on a unit with no vane. Paired with SWING_MODE in
+        supported_features, so the control only appears on vane-capable units."""
+        caps = self._caps
+        if caps is None or not caps.supports_swing:
+            return None
+        return caps.vane_modes()
 
     # --- unit handling -------------------------------------------------------
     # The device is Celsius-native (0.5°C). When HA's unit system is Fahrenheit we
@@ -322,6 +344,14 @@ class MAClimate(CoordinatorEntity[MACoordinator], ClimateEntity):
         return MA_TO_HA_FAN.get(status.fan_mode) if status else None
 
     @property
+    def swing_mode(self) -> str | None:
+        # Mapped by wire VALUE (not enum) to dodge the MAVaneMode NONE/STEP_5 == 0 alias.
+        status = self._status
+        if status is None:
+            return None
+        return MA_VANE_VALUE_TO_HA.get(int(status.vane_mode))
+
+    @property
     def hvac_action(self) -> HVACAction | None:
         status = self._status
         if status is None:
@@ -392,3 +422,14 @@ class MAClimate(CoordinatorEntity[MACoordinator], ClimateEntity):
             await self.coordinator.async_set_fan_mode(HA_TO_MA_FAN[fan_mode])
         except MAException as ex:
             raise ServiceValidationError(f"Failed to set fan mode: {ex}") from ex
+
+    async def async_set_swing_mode(self, swing_mode: str) -> None:
+        """Set the vane (vertical airflow) position via the climate swing control."""
+
+        vane_mode = HA_TO_MA_VANE.get(swing_mode)
+        if vane_mode is None:
+            raise ServiceValidationError(f"Unknown vane position: {swing_mode}")
+        try:
+            await self.coordinator.async_set_vane_mode(vane_mode)
+        except MAException as ex:
+            raise ServiceValidationError(f"Failed to set vane: {ex}") from ex
