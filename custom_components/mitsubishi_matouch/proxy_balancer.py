@@ -12,9 +12,9 @@ the scanner details aren't available.
 When `prefer_proxy` is on (default), it also excludes the HOST's built-in/HCI
 Bluetooth adapter from the pool whenever any REMOTE proxy can reach the device —
 regardless of RSSI. "Remote" is defined negatively: any scanner that is NOT one of
-the host's local adapters (from the public `async_get_adapters()` address set), so
-every proxy technology (ESP32/ESPHome, Shelly, future) qualifies without hard-coding
-a type. The host radio is used only as a last resort (no proxy in range).
+the host's local adapters (whose MACs come from the habluetooth manager's adapter
+list), so every proxy technology (ESP32/ESPHome, Shelly, future) qualifies without
+hard-coding a type. The host radio is used only as a last resort (no proxy in range).
 """
 
 import logging
@@ -25,6 +25,15 @@ from homeassistant.core import HomeAssistant
 from bleak.backends.device import BLEDevice
 
 from .const import PROXY_RSSI_FLOOR
+
+# The host's LOCAL Bluetooth adapters come from the habluetooth manager
+# (manager.async_get_bluetooth_adapters() -> {hci: AdapterDetails}); a scanner whose
+# source isn't one of these adapter MACs is a remote proxy. Guarded so a habluetooth API
+# move degrades to RSSI-greedy selection instead of breaking.
+try:
+    from habluetooth import get_manager as _bt_get_manager
+except Exception:  # noqa: BLE001 - internal API; degrade gracefully
+    _bt_get_manager = None
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -47,16 +56,21 @@ class MAProxyBalancer:
 
     async def async_refresh_local_sources(self) -> None:
         """Cache the host's LOCAL Bluetooth adapter addresses so pick() can prefer any
-        REMOTE proxy over them. `async_get_adapters()` is public and lists only the
-        host's own adapters (never remote proxies), so this needs no per-proxy-type
-        knowledge. Best-effort: on failure the set is left unchanged and the preference
-        simply falls back to RSSI-greedy selection."""
+        REMOTE proxy over them. The bluetooth manager's adapter list contains only the
+        host's own adapters (hci/USB) — remote proxies are scanners, not adapters — so
+        this needs no per-proxy-type knowledge (a local adapter's scanner.source equals
+        its AdapterDetails['address']). Best-effort: on failure the set is left unchanged
+        and the preference falls back to RSSI-greedy selection."""
 
-        try:
-            adapters = await bluetooth.async_get_adapters(self._hass)
-        except Exception as ex:  # noqa: BLE001 - API not ready / shape differences
-            _LOGGER.debug("async_get_adapters unavailable: %s", ex)
+        if _bt_get_manager is None:
             return
+        try:
+            adapters = await _bt_get_manager().async_get_bluetooth_adapters()
+        except Exception as ex:  # noqa: BLE001 - manager not ready / API shape
+            _LOGGER.debug("could not read local Bluetooth adapters: %s", ex)
+            return
+        # DEFAULT_ADDRESS (all-zero) means an unconfigured adapter — skip it (its scanner
+        # source falls back to the hci name, so it can't be matched by MAC anyway).
         sources = {
             details["address"].upper()
             for details in adapters.values()
@@ -139,8 +153,8 @@ class MAProxyBalancer:
         # Prefer any REMOTE Bluetooth proxy over the host's built-in / HCI adapter,
         # REGARDLESS of RSSI: if any candidate is NOT one of the host's local adapters,
         # drop the local adapter(s) from the pool entirely — the host radio is used only
-        # as a last resort (no proxy can reach the device). "Remote" = not in the local
-        # adapter set (async_get_adapters), so every proxy type qualifies. The host radio
+        # as a last resort (no proxy can reach the device). "Remote" = not in the host's
+        # local adapter-MAC set, so every proxy type qualifies. The host radio
         # is oversubscribed by persistent connections, can't be near every unit, and
         # suffers WiFi/BT coexistence + USB3 interference + driver breakage.
         if self.prefer_proxy and self._local_sources:

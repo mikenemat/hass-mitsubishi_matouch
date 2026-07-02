@@ -106,8 +106,9 @@ PROXY_RSSI_FLOOR = -90
 # is oversubscribed by many persistent connections, can't be near every unit, and is
 # subject to WiFi/BT coexistence + USB3 interference + kernel-driver breakage — so a
 # proxy is the better path in essentially every scenario except outright unavailability.
-# "Remote" is detected negatively (not in the host's async_get_adapters() address set),
-# so no per-proxy-type knowledge is hard-coded. Key kept as "prefer_proxy" for compat.
+# "Remote" is detected negatively (not one of the host's own Bluetooth adapter MACs, from
+# the habluetooth manager), so no per-proxy-type knowledge is hard-coded. Key kept as
+# "prefer_proxy" for compat.
 CONF_PREFER_PROXY = "prefer_proxy"
 DEFAULT_PREFER_PROXY = True
 
