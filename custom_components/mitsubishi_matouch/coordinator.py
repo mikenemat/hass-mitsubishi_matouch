@@ -474,7 +474,15 @@ class MACoordinator(DataUpdateCoordinator):
         self._active_source = source
         scanner = bluetooth.async_scanner_by_source(self.hass, source)
         name = getattr(scanner, "name", None)
-        self.active_proxy = f"{name} ({source})" if name else source
+        # A proxy scanner's name usually already embeds its MAC, e.g.
+        # "esp32-bluetooth-proxy-xxxx (AA:BB:CC:DD:EE:FF)". Only append the source when it
+        # isn't already in the name, so the MAC isn't printed twice.
+        if not name:
+            self.active_proxy = source
+        elif source.upper() in name.upper():
+            self.active_proxy = name
+        else:
+            self.active_proxy = f"{name} ({source})"
         self._balancer.note_connected(self._mac_address, source)
 
     async def async_rebalance(self) -> None:
