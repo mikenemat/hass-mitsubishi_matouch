@@ -482,7 +482,10 @@ async def async_migrate_entry(hass: HomeAssistant, entry: MAConfigEntry) -> bool
 async def async_setup_entry(hass: HomeAssistant, entry: MAConfigEntry) -> bool:
     """Set up the parent entry: one coordinator per thermostat subentry."""
 
-    _shared(hass)
+    balancer, _telemetry = _shared(hass)
+    # Learn the host's local Bluetooth adapters before any unit connects, so the
+    # prefer-proxy exclusion knows which sources are the built-in radio (vs proxies).
+    await balancer.async_refresh_local_sources()
     runtime = MARuntimeData(options=dict(entry.options))
     entry.runtime_data = runtime
 
@@ -754,6 +757,9 @@ async def _rebalance(hass: HomeAssistant, entry: MAConfigEntry) -> None:
     runtime = entry.runtime_data
     if runtime is None or hass.is_stopping or runtime.rebalancing:
         return
+    # Refresh the host's local-adapter set here (runs on proxy events + periodically) so a
+    # hot-plugged/removed USB Bluetooth adapter is reflected in the prefer-proxy exclusion.
+    await _shared(hass)[0].async_refresh_local_sources()
     runtime.rebalancing = True
     try:
         # Bounded by the device count: each device is bounced at most once per sweep

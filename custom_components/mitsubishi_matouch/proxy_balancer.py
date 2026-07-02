@@ -1,4 +1,5 @@
-"""Distribute MA Touch BLE connections evenly across ESP32 Bluetooth proxies.
+"""Distribute MA Touch BLE connections across Bluetooth proxies, and (optionally)
+prefer any remote proxy over the host's built-in radio.
 
 Home Assistant's native routing is RSSI-greedy: it connects through whichever
 adapter/proxy hears a device loudest, capped only by each proxy's free connection
@@ -7,6 +8,13 @@ connections onto a single radio. This balancer instead spreads our connections
 across the proxies that can actually reach each thermostat (above an RSSI floor),
 picking the least-loaded one. It degrades gracefully to HA's default selection if
 the scanner details aren't available.
+
+When `prefer_proxy` is on (default), it also excludes the HOST's built-in/HCI
+Bluetooth adapter from the pool whenever any REMOTE proxy can reach the device —
+regardless of RSSI. "Remote" is defined negatively: any scanner that is NOT one of
+the host's local adapters (from the public `async_get_adapters()` address set), so
+every proxy technology (ESP32/ESPHome, Shelly, future) qualifies without hard-coding
+a type. The host radio is used only as a last resort (no proxy in range).
 """
 
 import logging
@@ -17,14 +25,6 @@ from homeassistant.core import HomeAssistant
 from bleak.backends.device import BLEDevice
 
 from .const import PROXY_RSSI_FLOOR
-
-# Used to tell a REMOTE (ESP32 proxy) scanner apart from the host's local/HCI adapter,
-# so we can prefer proxies. Guarded: if habluetooth's internal class name ever moves,
-# preference simply no-ops and we fall back to RSSI-greedy selection (no breakage).
-try:
-    from habluetooth import BaseHaRemoteScanner
-except Exception:  # noqa: BLE001 - internal API; degrade gracefully
-    BaseHaRemoteScanner = None
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -37,9 +37,39 @@ class MAProxyBalancer:
 
         self._hass = hass
         self._assignments: dict[str, str] = {}  # mac (upper) -> proxy source
-        # Integration-wide: prefer ESP32 proxies over the host/HCI radio regardless of
-        # RSSI (set from the entry options; DEFAULT_PREFER_PROXY). See pick().
+        # Integration-wide: prefer any remote Bluetooth proxy over the host's built-in
+        # radio regardless of RSSI (set from the entry options; DEFAULT_PREFER_PROXY).
         self.prefer_proxy: bool = True
+        # Uppercased MAC addresses of the host's LOCAL Bluetooth adapters, populated by
+        # async_refresh_local_sources(). Any scanner NOT in this set is treated as a
+        # remote proxy and preferred. Empty => the exclusion is skipped (safe fallback).
+        self._local_sources: set[str] = set()
+
+    async def async_refresh_local_sources(self) -> None:
+        """Cache the host's LOCAL Bluetooth adapter addresses so pick() can prefer any
+        REMOTE proxy over them. `async_get_adapters()` is public and lists only the
+        host's own adapters (never remote proxies), so this needs no per-proxy-type
+        knowledge. Best-effort: on failure the set is left unchanged and the preference
+        simply falls back to RSSI-greedy selection."""
+
+        try:
+            adapters = await bluetooth.async_get_adapters(self._hass)
+        except Exception as ex:  # noqa: BLE001 - API not ready / shape differences
+            _LOGGER.debug("async_get_adapters unavailable: %s", ex)
+            return
+        sources = {
+            details["address"].upper()
+            for details in adapters.values()
+            if details.get("address") and details["address"] != "00:00:00:00:00:00"
+        }
+        if sources:
+            self._local_sources = sources
+            _LOGGER.debug("local Bluetooth adapters (deprioritized vs proxies): %s", sources)
+
+    def _is_local(self, source: str | None) -> bool:
+        """True if `source` is one of the host's own Bluetooth adapters (not a proxy)."""
+
+        return bool(source) and source.upper() in self._local_sources
 
     @property
     def assignments(self) -> dict[str, str]:
@@ -106,14 +136,15 @@ class MAProxyBalancer:
             )
             return device, None, None
 
-        # Prefer ESP32 proxies over the host's built-in / HCI adapter, REGARDLESS of RSSI:
-        # if ANY remote (proxy) scanner sees the device, drop the local adapter from the
-        # pool entirely, so the host radio is used only as a last resort (no proxy reaches
-        # the device). The host radio is oversubscribed by persistent connections, can't be
-        # near every unit, and suffers WiFi/BT coexistence + USB3 interference + driver
-        # breakage — a proxy is better in essentially every case except outright reach.
-        if self.prefer_proxy and BaseHaRemoteScanner is not None:
-            remote = [sd for sd in candidates if isinstance(sd.scanner, BaseHaRemoteScanner)]
+        # Prefer any REMOTE Bluetooth proxy over the host's built-in / HCI adapter,
+        # REGARDLESS of RSSI: if any candidate is NOT one of the host's local adapters,
+        # drop the local adapter(s) from the pool entirely — the host radio is used only
+        # as a last resort (no proxy can reach the device). "Remote" = not in the local
+        # adapter set (async_get_adapters), so every proxy type qualifies. The host radio
+        # is oversubscribed by persistent connections, can't be near every unit, and
+        # suffers WiFi/BT coexistence + USB3 interference + driver breakage.
+        if self.prefer_proxy and self._local_sources:
+            remote = [sd for sd in candidates if not self._is_local(sd.scanner.source)]
             if remote:
                 candidates = remote
 

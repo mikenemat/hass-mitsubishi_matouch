@@ -99,12 +99,15 @@ DEFAULT_SCAN_INTERVAL = 10 # seconds; cheap now that the connection is persisten
 # this (dBm), unless no stronger proxy can reach it.
 PROXY_RSSI_FLOOR = -90
 
-# Integration-wide option: prefer ESP32 Bluetooth proxies over the HOST's built-in /
+# Integration-wide option: prefer any REMOTE Bluetooth proxy (ESP32/ESPHome, Shelly,
+# future tech — anything that isn't the host's own adapter) over the HOST's built-in /
 # HCI Bluetooth radio for connections, REGARDLESS of RSSI — i.e. only fall back to the
 # local adapter when no proxy can reach the device at all. Default on: the host radio
 # is oversubscribed by many persistent connections, can't be near every unit, and is
 # subject to WiFi/BT coexistence + USB3 interference + kernel-driver breakage — so a
 # proxy is the better path in essentially every scenario except outright unavailability.
+# "Remote" is detected negatively (not in the host's async_get_adapters() address set),
+# so no per-proxy-type knowledge is hard-coded. Key kept as "prefer_proxy" for compat.
 CONF_PREFER_PROXY = "prefer_proxy"
 DEFAULT_PREFER_PROXY = True
 
