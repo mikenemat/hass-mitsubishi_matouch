@@ -158,26 +158,11 @@ class MAClimate(CoordinatorEntity[MACoordinator], ClimateEntity):
 
     @property
     def available(self) -> bool:
-        """Go unavailable promptly on a real outage, but tolerate ONE transient blip
-        so a single adv gap / rebalance hop doesn't flicker the card.
+        """Tolerant availability (shared with the Hold switch): steady through the
+        endemic ~43-min BLE reconnect, greys only on a sustained outage. Logic lives on
+        the coordinator (card_available) so every control entity agrees."""
 
-        Two independent grey-out triggers so a hung in-flight poll can't hide an
-        outage (the bug behind units staying 'online' through a full proxy loss):
-          - consecutive-failure streak ≥ 2 — fast for units that fail cleanly; but a
-            wedged poll never records a result, so it can freeze this counter; and
-          - `is_stale` — a wall-clock check (no successful poll in several cadences)
-            that a frozen counter can't defeat. The per-poll timeout guarantees a
-            wedged poll eventually fails and re-fires this evaluation.
-
-        Combined with commands that raise when they can't be delivered, the user can
-        trust that a live-looking card is actually controllable.
-        """
-
-        if self.coordinator.last_update_success:
-            return True
-        if self.coordinator.is_stale:
-            return False
-        return self.coordinator.consecutive_failures < 2
+        return self.coordinator.card_available
 
     # --- capability gating ---------------------------------------------------
     # Until the device-info blob is fetched (coordinator.capabilities is None) the

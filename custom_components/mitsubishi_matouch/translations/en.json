@@ -71,9 +71,13 @@
       "init": {
         "title": "Mitsubishi MA Touch options",
         "data": {
+          "prefer_proxy": "Prefer ESP32 Bluetooth proxies over the host's built-in radio",
           "scan_interval": "Polling interval (seconds)",
           "log_polls": "Log every poll to the telemetry file (verbose)",
           "capture_raw_frames": "Capture raw status frames (for debugging)"
+        },
+        "data_description": {
+          "prefer_proxy": "Route connections through ESP32 Bluetooth proxies whenever one can reach the thermostat, even if the host's built-in/USB Bluetooth adapter reports a stronger signal. The host radio is used only as a last resort (no proxy in range). Recommended on: proxies distribute connections and sit near the units, avoiding the host adapter's connection limits, Wi-Fi/Bluetooth interference, and driver issues. Applies to each unit on its next reconnect."
         }
       }
     }

@@ -37,6 +37,8 @@ from homeassistant.helpers.selector import (
 )
 
 from .const import (
+    CONF_PREFER_PROXY,
+    DEFAULT_PREFER_PROXY,
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
     MA_TOUCH_NAME_MATCH,
@@ -343,6 +345,10 @@ class MAOptionsFlow(OptionsFlow):
             step_id="init",
             data_schema=vol.Schema(
                 {
+                    vol.Optional(
+                        CONF_PREFER_PROXY,
+                        default=opts.get(CONF_PREFER_PROXY, DEFAULT_PREFER_PROXY),
+                    ): bool,
                     vol.Optional(
                         "scan_interval", default=opts.get("scan_interval", DEFAULT_SCAN_INTERVAL)
                     ): vol.All(vol.Coerce(int), vol.Range(min=5, max=3600)),

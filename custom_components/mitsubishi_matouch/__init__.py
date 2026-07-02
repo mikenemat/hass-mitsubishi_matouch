@@ -22,6 +22,8 @@ import homeassistant.helpers.config_validation as cv
 
 from .const import (
     AVAILABILITY_TICK_INTERVAL,
+    CONF_PREFER_PROXY,
+    DEFAULT_PREFER_PROXY,
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
     REBALANCE_COOLDOWN,
@@ -241,6 +243,9 @@ def _build_coordinator(hass: HomeAssistant, entry: MAConfigEntry, subentry: Conf
     """Construct (but don't start) a coordinator for one thermostat subentry."""
 
     balancer, telemetry = _shared(hass)
+    # Integration-wide proxy preference (one shared balancer): prefer ESP32 proxies over
+    # the host/HCI radio regardless of RSSI. Set here (and live in _update_listener).
+    balancer.prefer_proxy = entry.options.get(CONF_PREFER_PROXY, DEFAULT_PREFER_PROXY)
     address = subentry.data[CONF_ADDRESS]
     pin = subentry.data[CONF_PIN]
     name = subentry.data.get(CONF_NAME) or f"MA Touch {address}"
@@ -669,6 +674,10 @@ async def _update_listener(hass: HomeAssistant, entry: MAConfigEntry) -> None:
         # lockstep so the next diff baselines correctly.
         if dict(entry.options) != runtime.options:
             opts = entry.options
+            # Proxy preference is integration-wide (shared balancer). Applies to the next
+            # connect/rebalance for each unit — existing links migrate off the host radio
+            # on their next reconnect (the endemic recycle guarantees that within ~an hour).
+            _shared(hass)[0].prefer_proxy = opts.get(CONF_PREFER_PROXY, DEFAULT_PREFER_PROXY)
             for coordinator in runtime.coordinators.values():
                 coordinator.apply_options(
                     opts.get("scan_interval", DEFAULT_SCAN_INTERVAL),

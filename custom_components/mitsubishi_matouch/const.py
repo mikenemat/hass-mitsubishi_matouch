@@ -99,6 +99,15 @@ DEFAULT_SCAN_INTERVAL = 10 # seconds; cheap now that the connection is persisten
 # this (dBm), unless no stronger proxy can reach it.
 PROXY_RSSI_FLOOR = -90
 
+# Integration-wide option: prefer ESP32 Bluetooth proxies over the HOST's built-in /
+# HCI Bluetooth radio for connections, REGARDLESS of RSSI — i.e. only fall back to the
+# local adapter when no proxy can reach the device at all. Default on: the host radio
+# is oversubscribed by many persistent connections, can't be near every unit, and is
+# subject to WiFi/BT coexistence + USB3 interference + kernel-driver breakage — so a
+# proxy is the better path in essentially every scenario except outright unavailability.
+CONF_PREFER_PROXY = "prefer_proxy"
+DEFAULT_PREFER_PROXY = True
+
 # Dispatcher signal (namespaced per entry) fired when a thermostat subentry is
 # added at runtime so the platforms create its entities without a parent reload.
 SIGNAL_NEW_THERMOSTAT = "mitsubishi_matouch_new_thermostat"

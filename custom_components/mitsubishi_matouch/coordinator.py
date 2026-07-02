@@ -36,7 +36,18 @@ _POLL_TIMEOUT = 30
 # Wall-clock backstop: grey the card if no poll has SUCCEEDED in this long (scaled to
 # the poll cadence). Unlike the consecutive-failure counter, a hung poll can't freeze
 # the clock — this is what guarantees a unit can't stay "online" through an outage.
-_STALE_FLOOR = 45
+# Raised 45 -> 90: these thermostats recycle their BLE link on an endemic ~43-min
+# cadence (device/stack-side, not ours), and each reconnect recovers in ~15-30s. At 45
+# a slightly-slow reconnect greyed the card; 90 absorbs the recycle blip while still
+# surfacing a genuine outage in ~1.5 min. See _FAILURE_GRACE below.
+_STALE_FLOOR = 90
+# Consecutive failed polls tolerated before a card greys out. The endemic ~43-min
+# reconnect costs 1 failed poll (occasionally 2-3 when two recycles cluster); tolerating
+# up to 3 keeps the card steady through the recycle instead of flickering unavailable
+# ~hourly, while a real outage (which keeps failing) still greys within a few polls.
+# Deliberately leans on the failed-poll streak (+ is_stale) rather than the keepalive,
+# so a single missed keepalive/poll during a recycle doesn't reset the card.
+_FAILURE_GRACE = 4
 # Minimum seconds between persisting repeated identical poll failures to the file.
 _FAILURE_LOG_INTERVAL = 60
 # Consecutive bad-PIN responses required before raising the Repairs issue. Two
@@ -237,6 +248,24 @@ class MACoordinator(DataUpdateCoordinator):
             return True
         threshold = max(self._base_interval * 4, _STALE_FLOOR)
         return (time.monotonic() - self._last_success_monotonic) > threshold
+
+    @property
+    def card_available(self) -> bool:
+        """Tolerant availability for the control entities (climate/switch).
+
+        Stays available through the endemic ~43-min BLE reconnect (a brief failed-poll
+        streak) so the card doesn't flicker unavailable ~hourly, and greys only on a
+        SUSTAINED outage. Two independent grey triggers so a hung in-flight poll can't
+        hide an outage: the consecutive-failure streak (fast for units that fail cleanly)
+        AND `is_stale` (a wall-clock backstop a frozen counter can't defeat). Diagnostic/
+        telemetry sensors keep their own always-available behavior.
+        """
+
+        if self.last_update_success:
+            return True
+        if self.is_stale:
+            return False
+        return self.consecutive_failures < _FAILURE_GRACE
 
     @property
     def is_wedged(self) -> bool:

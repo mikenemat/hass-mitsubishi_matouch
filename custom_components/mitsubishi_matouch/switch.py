@@ -115,11 +115,7 @@ class MAHoldSwitch(CoordinatorEntity[MACoordinator], SwitchEntity):
 
     @property
     def available(self) -> bool:
-        """Mirror the climate entity's availability (tolerate one transient blip)."""
+        """Mirror the climate entity's availability (shared coordinator.card_available:
+        tolerant of the endemic ~43-min reconnect, greys only on a sustained outage)."""
 
-        c = self.coordinator
-        if c.last_update_success:
-            return True
-        if c.is_stale:
-            return False
-        return c.consecutive_failures < 2
+        return self.coordinator.card_available

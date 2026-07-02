@@ -18,6 +18,14 @@ from bleak.backends.device import BLEDevice
 
 from .const import PROXY_RSSI_FLOOR
 
+# Used to tell a REMOTE (ESP32 proxy) scanner apart from the host's local/HCI adapter,
+# so we can prefer proxies. Guarded: if habluetooth's internal class name ever moves,
+# preference simply no-ops and we fall back to RSSI-greedy selection (no breakage).
+try:
+    from habluetooth import BaseHaRemoteScanner
+except Exception:  # noqa: BLE001 - internal API; degrade gracefully
+    BaseHaRemoteScanner = None
+
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -29,6 +37,9 @@ class MAProxyBalancer:
 
         self._hass = hass
         self._assignments: dict[str, str] = {}  # mac (upper) -> proxy source
+        # Integration-wide: prefer ESP32 proxies over the host/HCI radio regardless of
+        # RSSI (set from the entry options; DEFAULT_PREFER_PROXY). See pick().
+        self.prefer_proxy: bool = True
 
     @property
     def assignments(self) -> dict[str, str]:
@@ -94,6 +105,17 @@ class MAProxyBalancer:
                 self._hass, mac_u, connectable=True
             )
             return device, None, None
+
+        # Prefer ESP32 proxies over the host's built-in / HCI adapter, REGARDLESS of RSSI:
+        # if ANY remote (proxy) scanner sees the device, drop the local adapter from the
+        # pool entirely, so the host radio is used only as a last resort (no proxy reaches
+        # the device). The host radio is oversubscribed by persistent connections, can't be
+        # near every unit, and suffers WiFi/BT coexistence + USB3 interference + driver
+        # breakage — a proxy is better in essentially every case except outright reach.
+        if self.prefer_proxy and BaseHaRemoteScanner is not None:
+            remote = [sd for sd in candidates if isinstance(sd.scanner, BaseHaRemoteScanner)]
+            if remote:
+                candidates = remote
 
         # Prefer proxies that hear the device above the floor; if none do, use all.
         reachable = [
