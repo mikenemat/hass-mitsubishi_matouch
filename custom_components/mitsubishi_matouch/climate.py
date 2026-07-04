@@ -36,8 +36,13 @@ from .const import (
     HA_TO_MA_VANE,
     MA_RL_VALUE_TO_HA,
     HA_TO_MA_RL,
-    MA_UNIT_STATE_TO_HVAC_ACTION,
     MA_UNIT_STATE_NAMES,
+    MA_UNIT_STATE_STANDBY_HEAT,
+    MA_UNIT_STATE_DEFROST,
+    MA_UNIT_STATE_WAIT_MULTI,
+    MA_UNIT_STATE_COOL,
+    MA_UNIT_STATE_HEAT,
+    MA_UNIT_STATE_REQUEST_COMP_OFF,
     SIGNAL_NEW_THERMOSTAT,
     SUBENTRY_TYPE_THERMOSTAT,
 )
@@ -367,30 +372,52 @@ class MAClimate(CoordinatorEntity[MACoordinator], ClimateEntity):
 
     @property
     def hvac_action(self) -> HVACAction | None:
-        """What the unit is physically doing right now, READ from the device's running
-        state (unit_state) — not inferred from room-vs-setpoint. The running state carries
-        real DEFROST and heat pre-warm (PREHEATING), and distinguishes actively-conditioning
-        from thermo-satisfied / waiting-for-the-shared-outdoor-unit — none of which inference
-        can see. HA permits only the eight HVACAction members, so states with no exact
-        equivalent (NORMAL / WAIT_MULTI / REQUEST_COMP_OFF) collapse to IDLE; the raw running
-        state is preserved in extra_state_attributes for automations/history."""
+        """What the unit is physically doing right now.
+
+        The device's running-state field (status.unit_state) is NOT a reliable
+        compressor-cycling signal on these slim/RAC units: verified live, it stays
+        NORMAL(0) the whole time a unit is actively cooling AND when it's off (on/off is
+        carried by the mode/power bits, not unit_state). So the BASE action follows the
+        running mode when the unit is on — mirroring the MELRemo app, whose status icon is
+        power+mode. unit_state only leaves 0 for the special outdoor states, which override:
+        defrost -> DEFROSTING, heat pre-warm -> PREHEATING, waiting on the shared multi-split
+        compressor or compressor-commanded-off -> IDLE. (These may never appear on slim units;
+        the raw value stays available in extra_state_attributes.)"""
         status = self._status
         if status is None:
             return None
         mode = status.operation_mode
         if mode is MAOperationMode.OFF:
             return HVACAction.OFF
-        if mode is MAOperationMode.FAN:
-            # Fan-only always moves air; the compressor never serves this head.
-            return HVACAction.FAN
-        action = MA_UNIT_STATE_TO_HVAC_ACTION.get(status.unit_state)
-        if action is None:
-            # NORMAL / WAIT_MULTI / REQUEST_COMP_OFF / unknown -> not actively conditioning.
+        us = status.unit_state
+        # Special outdoor states the device reports explicitly (override the mode):
+        if us == MA_UNIT_STATE_DEFROST:
+            return HVACAction.DEFROSTING
+        if us == MA_UNIT_STATE_STANDBY_HEAT:
+            return HVACAction.PREHEATING
+        if us in (MA_UNIT_STATE_WAIT_MULTI, MA_UNIT_STATE_REQUEST_COMP_OFF):
+            # On, but not conditioning this head: shared outdoor busy / compressor off.
             return HVACAction.IDLE
-        # In DRY mode the compressor runs a cooling cycle to dehumidify; label it DRYING.
-        if mode is MAOperationMode.DRY and action is HVACAction.COOLING:
+        # NORMAL(0) = operating normally; 5/6 = explicit cool/heat. Action follows the mode.
+        if mode is MAOperationMode.HEAT or us == MA_UNIT_STATE_HEAT:
+            return HVACAction.HEATING
+        if mode is MAOperationMode.COOL or us == MA_UNIT_STATE_COOL:
+            return HVACAction.COOLING
+        if mode is MAOperationMode.DRY:
             return HVACAction.DRYING
-        return action
+        if mode is MAOperationMode.FAN:
+            return HVACAction.FAN
+        if mode is MAOperationMode.AUTO:
+            # Auto doesn't say which way it's driving; infer direction from room vs the two
+            # setpoints (unit_state gives no direction on slim units).
+            room, heat, cool = status.room_temperature, status.heat_setpoint, status.cool_setpoint
+            if room is not None:
+                if heat is not None and room <= heat:
+                    return HVACAction.HEATING
+                if cool is not None and room >= cool:
+                    return HVACAction.COOLING
+            return HVACAction.IDLE
+        return HVACAction.IDLE
 
     @property
     def extra_state_attributes(self) -> dict[str, str] | None:

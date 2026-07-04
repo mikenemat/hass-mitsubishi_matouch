@@ -1,6 +1,6 @@
 """Constants for the Mitsubishi MA Touch integration."""
 
-from homeassistant.components.climate import HVACMode, HVACAction
+from homeassistant.components.climate import HVACMode
 from homeassistant.components.climate.const import (
     FAN_AUTO,
     FAN_HIGH,
@@ -122,32 +122,35 @@ HA_TO_MA_RL: dict[str, MARightLeftMode] = {
     RL_POSITION_LABELS[4]: MARightLeftMode.RIGHT,
 }
 
-# --- Running state (unit_state) -> HVACAction ----------------------------------
+# --- Running state (unit_state) ------------------------------------------------
 # unit_state is the low nibble of the status frame's running-state byte (SDK
-# GeminiMobileData.UnitState), decoded in models.Status. Only the "actively conditioning"
-# states are mapped here; NORMAL(0), WAIT_MULTI(4, outdoor unit busy serving another head)
-# and REQUEST_COMP_OFF(7, setpoint satisfied) are deliberately ABSENT so they fall through
-# to IDLE — the honest action when the compressor isn't serving this head. DRY is handled
-# in climate.hvac_action (a COOL running-state under DRY mode reads as DRYING).
-MA_UNIT_STATE_TO_HVAC_ACTION: dict[int, HVACAction] = {
-    1: HVACAction.PREHEATING,   # STANDBY_HEAT (heat pre-warm)
-    2: HVACAction.DEFROSTING,   # DEFROST
-    5: HVACAction.COOLING,      # COOL
-    6: HVACAction.HEATING,      # HEAT
-}
+# GeminiMobileData.UnitState wire values), decoded in models.Status. IMPORTANT — verified
+# live on our slim/RAC units (2026-07-03, raw-frame diff across on/off/cooling): these
+# units keep unit_state at NORMAL(0) the WHOLE time they are actively conditioning; the
+# explicit COOL(5)/HEAT(6) values are City-Multi-only and never appear here. So NORMAL does
+# NOT mean idle — it means "operating normally in the set mode." unit_state only leaves 0
+# for the special outdoor states below, matching the MELRemo app (its status icon is
+# power+mode; unit_state only drives the standby/defrost labels and the wait-multi blink).
+# Consequently hvac_action derives the base action from the MODE when on (see
+# climate.hvac_action) and uses these values only as overrides.
+MA_UNIT_STATE_NORMAL = 0            # operating normally (actively conditioning per the mode)
+MA_UNIT_STATE_STANDBY_HEAT = 1      # heat pre-warm  -> PREHEATING
+MA_UNIT_STATE_DEFROST = 2           # defrost cycle  -> DEFROSTING
+MA_UNIT_STATE_WAIT_MULTI = 4        # on but shared outdoor unit is serving another head -> IDLE
+MA_UNIT_STATE_COOL = 5              # explicit cool (City-Multi; unused on slim)
+MA_UNIT_STATE_HEAT = 6              # explicit heat (City-Multi; unused on slim)
+MA_UNIT_STATE_REQUEST_COMP_OFF = 7  # compressor commanded off / satisfied -> IDLE
 
 # Stable snake_case names for the raw unit_state, surfaced as a climate extra-state
-# attribute so the nuance that IDLE collapses (satisfied vs waiting-for-outdoor-unit vs
-# defrost) stays queryable in automations and recorded in history. These strings are
-# historical — keep them stable.
+# attribute for automations/history. These strings are historical — keep them stable.
 MA_UNIT_STATE_NAMES: dict[int, str] = {
-    0: "normal",
-    1: "standby_heat",
-    2: "defrost",
-    4: "wait_multi",
-    5: "cool",
-    6: "heat",
-    7: "request_comp_off",
+    MA_UNIT_STATE_NORMAL: "normal",
+    MA_UNIT_STATE_STANDBY_HEAT: "standby_heat",
+    MA_UNIT_STATE_DEFROST: "defrost",
+    MA_UNIT_STATE_WAIT_MULTI: "wait_multi",
+    MA_UNIT_STATE_COOL: "cool",
+    MA_UNIT_STATE_HEAT: "heat",
+    MA_UNIT_STATE_REQUEST_COMP_OFF: "request_comp_off",
 }
 
 # HOLD is surfaced as a climate preset (only on units whose capability blob advertises
