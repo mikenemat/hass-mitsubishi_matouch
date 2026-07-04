@@ -420,17 +420,26 @@ class MAClimate(CoordinatorEntity[MACoordinator], ClimateEntity):
         return HVACAction.IDLE
 
     @property
-    def extra_state_attributes(self) -> dict[str, str] | None:
-        """Expose the raw device running state so the nuance hvac_action's IDLE collapses
-        (setpoint-satisfied vs waiting-for-outdoor-unit vs defrost) stays queryable in
-        automations and recorded in history."""
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        """Expose the raw device running state plus the multi-split mode-conflict flag.
+
+        `unit_state` keeps the nuance hvac_action's IDLE collapses (satisfied vs
+        waiting-for-outdoor-unit vs defrost) queryable in automations/history.
+
+        `mode_conflict` is the MELRemo "flashing mode icon" signal: on a multi-split the
+        shared outdoor unit runs ONE mode, so a head requesting the opposite is parked
+        (unit_state == WAIT_MULTI). When that happens, `hvac_mode` reflects the ACTUAL
+        system mode the unit reports (e.g. a cool-set head reads Heat) — the same thing the
+        app flashes near the set temp — and this flag says the head can't currently run its
+        requested mode."""
         status = self._status
         if status is None:
             return None
         return {
             "unit_state": MA_UNIT_STATE_NAMES.get(
                 status.unit_state, f"unknown_{status.unit_state}"
-            )
+            ),
+            "mode_conflict": status.unit_state == MA_UNIT_STATE_WAIT_MULTI,
         }
 
     # --- commands ---
