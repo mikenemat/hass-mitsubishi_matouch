@@ -143,10 +143,17 @@ def test_theater_gating():
 
 
 def test_vane_modes():
-    # vane=4 -> 5 fixed positions (Vane-prefixed for the climate "Swing mode" header) plus
-    # bare auto + swing.
-    full = ["auto", "Vane horizontal", "Vane down 20%", "Vane down 60%", "Vane down 80%", "Vane down 100%", "swing"]
+    # vane=4 -> 5 fixed position KEYS (slugs; HA renders labels/icons from translations)
+    # plus auto + swing.
+    full = ["auto", "flat", "down_20", "down_60", "down_80", "down_100", "swing"]
     assert caps_mod.parse_device_info(THEATER).vane_modes() == full
     assert caps_mod.parse_device_info(MAU_4087).vane_modes() == full
     # vane=0 -> no vane control at all.
     assert caps_mod.parse_device_info(MAU_2D15).vane_modes() == []
+
+
+def test_right_left_modes():
+    # These fleet blobs have no horizontal vane (right_left_steps == 0) -> no control.
+    assert caps_mod.parse_device_info(THEATER).supports_right_left is False
+    assert caps_mod.parse_device_info(THEATER).right_left_modes() == []
+    assert caps_mod.parse_device_info(MAU_4087).right_left_modes() == []

@@ -104,6 +104,28 @@
             "state": {
               "quiet": "Quiet"
             }
+          },
+          "swing_mode": {
+            "state": {
+              "auto": "Auto",
+              "flat": "Flat",
+              "down_20": "Down 20%",
+              "down_60": "Down 60%",
+              "down_80": "Down 80%",
+              "down_100": "Down 100%",
+              "swing": "Swing"
+            }
+          },
+          "swing_horizontal_mode": {
+            "state": {
+              "rl_auto": "Auto",
+              "rl_left": "Left",
+              "rl_left_center": "Left of center",
+              "rl_center": "Center",
+              "rl_right_center": "Right of center",
+              "rl_right": "Right",
+              "rl_swing": "Swing"
+            }
           }
         }
       }

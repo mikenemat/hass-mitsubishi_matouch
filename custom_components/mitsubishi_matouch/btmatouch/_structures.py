@@ -127,9 +127,12 @@ class _MAStatusResponse(_MAResponse):
     unknown_setpoint_3: float = csfield(_MATemperature(Bytes(2)))
     fan_mode: MAFanMode = csfield(TEnum(Int8un, MAFanMode))
     vane_mode: MAVaneMode = csfield(TEnum(Int8un, MAVaneMode))
-    unknown_5: int = csfield(Int8un)
-    unknown_6: int = csfield(Int8un)
-    unknown_7: int = csfield(Int8un)
+    unknown_5: int = csfield(Int8un) # oplock_* (on-device operation locks), 1 bit each
+    unknown_6: int = csfield(Int8un) # mode_limit_{cool,heat,dry,auto} + reserved
+    unknown_7: int = csfield(Int8un) # rclock_* (remote-controller locks) + reserved
+    # Running-state byte (SDK unitstate_mb + right_left_mb + reserved). Decoded in
+    # models.Status: unit_state = low nibble (heat/cool/defrost/standby/wait-multi/off),
+    # right_left = bits 4-6 (horizontal vane position). See MELRemo_Frame_Spec.md §4.
     unknown_8: int = csfield(Int8un)
     hold: bool = csfield(Flag) # not sure if its only hold or flags
     room_temperature: float = csfield(_MATemperature(Bytes(2)))

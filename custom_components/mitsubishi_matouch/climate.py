@@ -34,6 +34,10 @@ from .const import (
     HA_TO_MA_FAN,
     MA_VANE_VALUE_TO_HA,
     HA_TO_MA_VANE,
+    MA_RL_VALUE_TO_HA,
+    HA_TO_MA_RL,
+    MA_UNIT_STATE_TO_HVAC_ACTION,
+    MA_UNIT_STATE_NAMES,
     SIGNAL_NEW_THERMOSTAT,
     SUBENTRY_TYPE_THERMOSTAT,
 )
@@ -80,11 +84,13 @@ class MAClimate(CoordinatorEntity[MACoordinator], ClimateEntity):
     _attr_name = None
     _attr_translation_key = "matouch"
 
-    # Vane is exposed IN the climate card via the SWING_MODE control (added dynamically
-    # once caps show the unit has a vane — see supported_features/swing_modes). HA hard-codes
-    # that control's header as "Swing mode", so the option VALUES carry a "Vane" prefix to
-    # supply context (reads "Swing mode: Vane down 60%"). Hold stays a dedicated switch: it's
-    # an on/off, and cramming a toggle into climate's "preset" slot is semantically wrong.
+    # The vertical vane is exposed IN the climate card via the SWING_MODE control and the
+    # horizontal (left/right) vane via the native SWING_HORIZONTAL_MODE control (HA >=
+    # 2024.12) — each added dynamically once caps confirm the unit has that vane (see
+    # supported_features / swing_modes / swing_horizontal_modes). Display labels + per-
+    # position icons come from the entity translations and icons.json, so the option values
+    # are stable machine keys. Hold stays a dedicated switch: it's an on/off, and cramming a
+    # toggle into climate's "preset" slot is semantically wrong.
     _attr_supported_features = (
         ClimateEntityFeature.TARGET_TEMPERATURE
         | ClimateEntityFeature.TARGET_TEMPERATURE_RANGE
@@ -95,12 +101,17 @@ class MAClimate(CoordinatorEntity[MACoordinator], ClimateEntity):
 
     @property
     def supported_features(self) -> ClimateEntityFeature:
-        """Base features, plus SWING_MODE (vane) once caps confirm this unit has a vane.
-        Dynamic so a no-vane unit (vane=0) never shows an empty swing control."""
+        """Base features, plus SWING_MODE (vertical vane) and/or SWING_HORIZONTAL_MODE
+        (left/right vane) once caps confirm the unit has each. Dynamic so a unit without a
+        given vane never shows an empty control."""
+        features = self._attr_supported_features
         caps = self._caps
-        if caps is not None and caps.supports_swing:
-            return self._attr_supported_features | ClimateEntityFeature.SWING_MODE
-        return self._attr_supported_features
+        if caps is not None:
+            if caps.supports_swing:
+                features |= ClimateEntityFeature.SWING_MODE
+            if caps.supports_right_left:
+                features |= ClimateEntityFeature.SWING_HORIZONTAL_MODE
+        return features
 
     def __init__(self, coordinator: MACoordinator) -> None:
         """Initialize the MA Touch climate entity."""
@@ -198,13 +209,23 @@ class MAClimate(CoordinatorEntity[MACoordinator], ClimateEntity):
 
     @property
     def swing_modes(self) -> list[str] | None:
-        """Vane positions (auto / Vane horizontal / Vane down 20..100% / swing), or None
+        """Vertical vane position keys (auto / flat / down_20..down_100 / swing), or None
         until caps load or on a unit with no vane. Paired with SWING_MODE in
-        supported_features, so the control only appears on vane-capable units."""
+        supported_features, so the control only appears on vane-capable units. Display
+        labels + per-position icons come from the entity translations / icons.json."""
         caps = self._caps
         if caps is None or not caps.supports_swing:
             return None
         return caps.vane_modes()
+
+    @property
+    def swing_horizontal_modes(self) -> list[str] | None:
+        """Horizontal (left/right) vane position keys, or None until caps load or on a unit
+        with no horizontal vane. Paired with SWING_HORIZONTAL_MODE in supported_features."""
+        caps = self._caps
+        if caps is None or not caps.supports_right_left:
+            return None
+        return caps.right_left_modes()
 
     # --- unit handling -------------------------------------------------------
     # The device is Celsius-native (0.5°C). When HA's unit system is Fahrenheit we
@@ -337,33 +358,53 @@ class MAClimate(CoordinatorEntity[MACoordinator], ClimateEntity):
         return MA_VANE_VALUE_TO_HA.get(int(status.vane_mode))
 
     @property
-    def hvac_action(self) -> HVACAction | None:
+    def swing_horizontal_mode(self) -> str | None:
+        """Current horizontal (left/right) vane position, READ from the status frame."""
         status = self._status
         if status is None:
             return None
-        if status.operation_mode is MAOperationMode.OFF:
-            return HVACAction.OFF
-        # Any of these can be None if the device reported 0xFFFF ("not set"); treat a
-        # missing comparison input as "can't tell" (IDLE) rather than crashing.
-        room = status.room_temperature
-        if room is None:
+        return MA_RL_VALUE_TO_HA.get(status.right_left)
+
+    @property
+    def hvac_action(self) -> HVACAction | None:
+        """What the unit is physically doing right now, READ from the device's running
+        state (unit_state) — not inferred from room-vs-setpoint. The running state carries
+        real DEFROST and heat pre-warm (PREHEATING), and distinguishes actively-conditioning
+        from thermo-satisfied / waiting-for-the-shared-outdoor-unit — none of which inference
+        can see. HA permits only the eight HVACAction members, so states with no exact
+        equivalent (NORMAL / WAIT_MULTI / REQUEST_COMP_OFF) collapse to IDLE; the raw running
+        state is preserved in extra_state_attributes for automations/history."""
+        status = self._status
+        if status is None:
             return None
-        heat, cool = status.heat_setpoint, status.cool_setpoint
-        match status.operation_mode:
-            case MAOperationMode.AUTO:
-                if heat is not None and room <= heat:
-                    return HVACAction.HEATING
-                if cool is not None and room >= cool:
-                    return HVACAction.COOLING
-                return HVACAction.IDLE
-            case MAOperationMode.HEAT:
-                return HVACAction.HEATING if heat is not None and room <= heat else HVACAction.IDLE
-            case MAOperationMode.COOL:
-                return HVACAction.COOLING if cool is not None and room >= cool else HVACAction.IDLE
-            case MAOperationMode.DRY:
-                return HVACAction.DRYING if cool is not None and room >= cool else HVACAction.IDLE
-            case _:
-                return HVACAction.IDLE
+        mode = status.operation_mode
+        if mode is MAOperationMode.OFF:
+            return HVACAction.OFF
+        if mode is MAOperationMode.FAN:
+            # Fan-only always moves air; the compressor never serves this head.
+            return HVACAction.FAN
+        action = MA_UNIT_STATE_TO_HVAC_ACTION.get(status.unit_state)
+        if action is None:
+            # NORMAL / WAIT_MULTI / REQUEST_COMP_OFF / unknown -> not actively conditioning.
+            return HVACAction.IDLE
+        # In DRY mode the compressor runs a cooling cycle to dehumidify; label it DRYING.
+        if mode is MAOperationMode.DRY and action is HVACAction.COOLING:
+            return HVACAction.DRYING
+        return action
+
+    @property
+    def extra_state_attributes(self) -> dict[str, str] | None:
+        """Expose the raw device running state so the nuance hvac_action's IDLE collapses
+        (setpoint-satisfied vs waiting-for-outdoor-unit vs defrost) stays queryable in
+        automations and recorded in history."""
+        status = self._status
+        if status is None:
+            return None
+        return {
+            "unit_state": MA_UNIT_STATE_NAMES.get(
+                status.unit_state, f"unknown_{status.unit_state}"
+            )
+        }
 
     # --- commands ---
 
@@ -418,3 +459,16 @@ class MAClimate(CoordinatorEntity[MACoordinator], ClimateEntity):
             await self.coordinator.async_set_vane_mode(vane_mode)
         except MAException as ex:
             raise ServiceValidationError(f"Failed to set vane: {ex}") from ex
+
+    async def async_set_swing_horizontal_mode(self, swing_horizontal_mode: str) -> None:
+        """Set the horizontal (left/right) vane position via the climate control."""
+
+        right_left = HA_TO_MA_RL.get(swing_horizontal_mode)
+        if right_left is None:
+            raise ServiceValidationError(
+                f"Unknown horizontal vane position: {swing_horizontal_mode}"
+            )
+        try:
+            await self.coordinator.async_set_right_left_mode(right_left)
+        except MAException as ex:
+            raise ServiceValidationError(f"Failed to set horizontal vane: {ex}") from ex

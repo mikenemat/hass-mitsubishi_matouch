@@ -1,0 +1,32 @@
+{
+  "entity": {
+    "climate": {
+      "matouch": {
+        "state_attributes": {
+          "swing_mode": {
+            "state": {
+              "auto": "mdi:autorenew",
+              "flat": "mdi:arrow-right",
+              "down_20": "mdi:arrow-bottom-right",
+              "down_60": "mdi:arrow-bottom-right",
+              "down_80": "mdi:arrow-down",
+              "down_100": "mdi:arrow-down-bold",
+              "swing": "mdi:swap-vertical"
+            }
+          },
+          "swing_horizontal_mode": {
+            "state": {
+              "rl_auto": "mdi:autorenew",
+              "rl_left": "mdi:arrow-left",
+              "rl_left_center": "mdi:chevron-left",
+              "rl_center": "mdi:arrow-up",
+              "rl_right_center": "mdi:chevron-right",
+              "rl_right": "mdi:arrow-right",
+              "rl_swing": "mdi:swap-horizontal"
+            }
+          }
+        }
+      }
+    }
+  }
+}

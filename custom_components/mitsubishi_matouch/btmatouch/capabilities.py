@@ -27,19 +27,30 @@ from dataclasses import dataclass, field
 __all__ = [
     "Capabilities", "IndoorUnit", "parse_device_info", "parse_capability_blob",
     "VANE_AUTO", "VANE_SWING", "VANE_POSITION_LABELS",
+    "RL_AUTO", "RL_SWING", "RL_POSITION_LABELS",
 ]
 
-# Vane (vertical airflow) labels for the climate SWING_MODE control. AUTHORITATIVE from
-# the decompiled MELRemo SDK (GeminiMobileData.Vane + WindDirection.toRequestValue/
-# convertDirectionToVane): the five fixed positions are FLAT (horizontal) -> DOWNWARD20 ->
-# DOWNWARD60 -> DOWNWARD80 -> DOWNWARD100 (fully down). The fixed positions carry a "Vane"
-# prefix because HA hard-codes the control's header as "Swing mode" (not renamable) — so
-# the VALUE supplies the context, e.g. it reads "Swing mode: Vane down 60%". auto/swing are
-# left bare (they read fine under that header). The wire-value <-> label mapping lives in
-# const.MA_VANE_VALUE_TO_HA / HA_TO_MA_VANE; this list is positions 1..5 in order.
+# Vane (vertical airflow) POSITION KEYS for the climate SWING_MODE control. These are
+# stable machine slugs, NOT display text: Home Assistant renders the human labels from the
+# entity's translations (entity.climate.matouch.state_attributes.swing_mode.state.<key>)
+# and the per-position icons from icons.json, so the keys must stay snake_case with no
+# spaces/percent signs. AUTHORITATIVE ordering from the decompiled MELRemo SDK
+# (GeminiMobileData.Vane + WindDirection.toRequestValue/convertDirectionToVane): the five
+# fixed positions are FLAT (airflow level) -> DOWNWARD20 -> DOWNWARD60 -> DOWNWARD80 ->
+# DOWNWARD100 (fully down). The wire-value <-> key mapping lives in const.MA_VANE_VALUE_TO_HA
+# / HA_TO_MA_VANE; this list is positions 1..5 in order.
 VANE_AUTO = "auto"
 VANE_SWING = "swing"
-VANE_POSITION_LABELS = ["Vane horizontal", "Vane down 20%", "Vane down 60%", "Vane down 80%", "Vane down 100%"]
+VANE_POSITION_LABELS = ["flat", "down_20", "down_60", "down_80", "down_100"]
+
+# Horizontal (left/right) vane POSITION KEYS for the climate SWING_HORIZONTAL_MODE control
+# (HA >= 2024.12). Same slug/translation/icon rules as the vertical vane above. Ordered
+# left-to-right; a 3-step unit exposes the coarse [left, center, right] subset (indices
+# 0/2/4), a 7-step unit exposes all five. auto + swing bracket the list. Wire-value <-> key
+# mapping lives in const.MA_RL_VALUE_TO_HA / HA_TO_MA_RL (keyed off MARightLeftMode).
+RL_AUTO = "rl_auto"
+RL_SWING = "rl_swing"
+RL_POSITION_LABELS = ["rl_left", "rl_left_center", "rl_center", "rl_right_center", "rl_right"]
 
 # Response header length before the m0/i/a structure (phase 1 + L3 major/sub echo 2 +
 # result 2 + 1). Validated against the live CT01MA device-info response.
@@ -178,6 +189,11 @@ class Capabilities:
         """Whether this unit has a controllable (swingable) vertical vane."""
         return self.vane > 0
 
+    @property
+    def supports_right_left(self) -> bool:
+        """Whether this unit has a controllable horizontal (left/right) vane."""
+        return self.right_left_steps > 0
+
     def fan_modes(self) -> list[str]:
         """HA fan-mode strings this unit supports, by fan-step count + fan-auto.
 
@@ -203,17 +219,34 @@ class Capabilities:
         }
 
     def vane_modes(self) -> list[str]:
-        """HA swing-mode strings for this unit's vane, or [] if it has no vane.
+        """HA swing_mode KEYS for this unit's vane, or [] if it has no vane.
 
         Positions scale with the vane capability the same way fan steps do
         (vane 1 -> 2 positions ... vane 4 -> 5 positions), plus 'auto' and 'swing'.
-        Labels match const.MA_VANE_VALUE_TO_HA / HA_TO_MA_VANE (auto / horizontal /
-        down 20% / down 60% / down 80% / down 100% / swing).
+        Keys match const.MA_VANE_VALUE_TO_HA / HA_TO_MA_VANE (auto / flat / down_20 /
+        down_60 / down_80 / down_100 / swing); display labels + icons come from the
+        entity translations and icons.json.
         """
         if self.vane <= 0:
             return []
         positions = min(self.vane + 1, len(VANE_POSITION_LABELS))
         return [VANE_AUTO] + VANE_POSITION_LABELS[:positions] + [VANE_SWING]
+
+    def right_left_modes(self) -> list[str]:
+        """HA swing_horizontal_mode KEYS for this unit's L/R vane, or [] if none.
+
+        A 7-step unit exposes all five discrete positions; a 3-step unit exposes the
+        coarse [left, center, right] subset. auto + swing bracket the list. Keys match
+        const.MA_RL_VALUE_TO_HA / HA_TO_MA_RL; labels + icons come from the entity
+        translations and icons.json.
+        """
+        if self.right_left_steps <= 0:
+            return []
+        if self.right_left_steps >= 7:
+            positions = list(RL_POSITION_LABELS)
+        else:  # 3-step: left / center / right
+            positions = [RL_POSITION_LABELS[0], RL_POSITION_LABELS[2], RL_POSITION_LABELS[4]]
+        return [RL_AUTO] + positions + [RL_SWING]
 
     def as_dict(self) -> dict:
         """Flat, JSON-friendly view (for diagnostics / the fetch service)."""

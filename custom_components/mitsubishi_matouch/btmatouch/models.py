@@ -59,6 +59,13 @@ class Status(_BaseModel[_MAStatusResponse]):
     vane_mode: MAVaneMode
     hold: bool
     operation_mode: MAOperationMode
+    # Running state + horizontal-vane position, decoded from the status frame's
+    # running-state byte (struct.unknown_8). unit_state is the low nibble (heat/cool/
+    # defrost/standby/etc. — see const.MA_UNIT_STATE_*); right_left is bits 4-6 (the L/R
+    # vane position, MARightLeftMode). Raw ints so an unmapped/reserved wire value never
+    # raises. Defaults keep older construction/replace() call sites working.
+    unit_state: int = 0
+    right_left: int = 0
 
     @classmethod
     def _from_struct(cls, struct: _MAStatusResponse) -> Self:
@@ -75,6 +82,10 @@ class Status(_BaseModel[_MAStatusResponse]):
             fan_mode=struct.fan_mode,
             vane_mode=struct.vane_mode,
             hold=struct.hold,
+            # unit_state = low nibble, right_left = bits 4-6 (first-declared field lands in
+            # the low bits per the SDK bit packer — verified against sdk/a.java).
+            unit_state=struct.unknown_8 & 0x0F,
+            right_left=(struct.unknown_8 >> 4) & 0x07,
             operation_mode=MAOperationMode.AUTO if struct.operation_mode_flags & (_MAOperationModeFlags.FAN|_MAOperationModeFlags.AUTO) == (_MAOperationModeFlags.FAN|_MAOperationModeFlags.AUTO)
             else MAOperationMode.DRY if struct.operation_mode_flags & (_MAOperationModeFlags.FAN|_MAOperationModeFlags.DRY|_MAOperationModeFlags.HEAT) == (_MAOperationModeFlags.FAN|_MAOperationModeFlags.DRY|_MAOperationModeFlags.HEAT)
             else MAOperationMode.HEAT if struct.operation_mode_flags & (_MAOperationModeFlags.FAN|_MAOperationModeFlags.HEAT) == (_MAOperationModeFlags.FAN|_MAOperationModeFlags.HEAT)

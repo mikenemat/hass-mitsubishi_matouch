@@ -1,6 +1,6 @@
 """Constants for the Mitsubishi MA Touch integration."""
 
-from homeassistant.components.climate import HVACMode
+from homeassistant.components.climate import HVACMode, HVACAction
 from homeassistant.components.climate.const import (
     FAN_AUTO,
     FAN_HIGH,
@@ -9,8 +9,15 @@ from homeassistant.components.climate.const import (
     FAN_OFF,
 )
 
-from .btmatouch.const import MAOperationMode, MAFanMode, MAVaneMode
-from .btmatouch.capabilities import VANE_AUTO, VANE_SWING, VANE_POSITION_LABELS
+from .btmatouch.const import MAOperationMode, MAFanMode, MAVaneMode, MARightLeftMode
+from .btmatouch.capabilities import (
+    VANE_AUTO,
+    VANE_SWING,
+    VANE_POSITION_LABELS,
+    RL_AUTO,
+    RL_SWING,
+    RL_POSITION_LABELS,
+)
 
 DOMAIN = "mitsubishi_matouch"
 
@@ -59,24 +66,25 @@ HA_TO_MA_FAN: dict[str, MAFanMode] = {
     "quiet": MAFanMode.QUIET,
 }
 
-# --- Vane (vertical airflow) <-> HA swing-mode labels --------------------------
+# --- Vane (vertical airflow) <-> HA swing_mode keys ----------------------------
 # The vane has up to 5 fixed positions plus auto + swing, surfaced via the climate swing
-# control (gated by the per-unit vane capability). Labels are the human-readable airflow
-# directions (capabilities.VANE_POSITION_LABELS), AUTHORITATIVE from the decompiled SDK:
-# wire 3 = FLAT (horizontal), 5 = DOWNWARD20, 2 = DOWNWARD60, 1 = DOWNWARD80,
-# 0 = DOWNWARD100 (fully down). (GeminiMobileData WindDirection.toRequestValue /
-# convertDirectionToVane.)
+# control (gated by the per-unit vane capability). The mapped strings are stable machine
+# KEYS (capabilities.VANE_*); Home Assistant renders the display labels + per-position
+# icons from the entity translations / icons.json. Wire ordering is AUTHORITATIVE from the
+# decompiled SDK: wire 3 = FLAT (airflow level), 5 = DOWNWARD20, 2 = DOWNWARD60,
+# 1 = DOWNWARD80, 0 = DOWNWARD100 (fully down). (GeminiMobileData WindDirection.toRequestValue
+# / convertDirectionToVane.)
 #
 # READ is mapped by the WIRE VALUE (not the MAVaneMode member) because MAVaneMode.NONE
 # and STEP_5 both equal 0 — an enum lookup of 0 yields NONE, so a value table avoids
-# that alias. SET maps the HA label to the right MAVaneMode member.
+# that alias. SET maps the HA key to the right MAVaneMode member.
 MA_VANE_VALUE_TO_HA: dict[int, str] = {
     int(MAVaneMode.AUTO): VANE_AUTO,                 # 6
-    int(MAVaneMode.STEP_1): VANE_POSITION_LABELS[0], # 3 -> horizontal
-    int(MAVaneMode.STEP_2): VANE_POSITION_LABELS[1], # 5 -> down 20%
-    int(MAVaneMode.STEP_3): VANE_POSITION_LABELS[2], # 2 -> down 60%
-    int(MAVaneMode.STEP_4): VANE_POSITION_LABELS[3], # 1 -> down 80%
-    int(MAVaneMode.STEP_5): VANE_POSITION_LABELS[4], # 0 -> down 100%
+    int(MAVaneMode.STEP_1): VANE_POSITION_LABELS[0], # 3 -> flat
+    int(MAVaneMode.STEP_2): VANE_POSITION_LABELS[1], # 5 -> down_20
+    int(MAVaneMode.STEP_3): VANE_POSITION_LABELS[2], # 2 -> down_60
+    int(MAVaneMode.STEP_4): VANE_POSITION_LABELS[3], # 1 -> down_80
+    int(MAVaneMode.STEP_5): VANE_POSITION_LABELS[4], # 0 -> down_100
     int(MAVaneMode.SWING): VANE_SWING,               # 7
 }
 HA_TO_MA_VANE: dict[str, MAVaneMode] = {
@@ -87,6 +95,59 @@ HA_TO_MA_VANE: dict[str, MAVaneMode] = {
     VANE_POSITION_LABELS[3]: MAVaneMode.STEP_4,
     VANE_POSITION_LABELS[4]: MAVaneMode.STEP_5,
     VANE_SWING: MAVaneMode.SWING,
+}
+
+# --- Horizontal (left/right) vane <-> HA swing_horizontal_mode keys ------------
+# right_left is bits 4-6 of the status running-state byte (SDK GeminiMobileData.RightLeft /
+# MARightLeftMode), surfaced via the native SWING_HORIZONTAL_MODE control (HA >= 2024.12),
+# gated on the per-unit right_left capability. Mapped strings are capabilities.RL_* KEYS;
+# labels + icons come from translations / icons.json. READ maps by wire VALUE; SET maps the
+# HA key back to the MARightLeftMode member.
+MA_RL_VALUE_TO_HA: dict[int, str] = {
+    int(MARightLeftMode.AUTO): RL_AUTO,                        # 2
+    int(MARightLeftMode.SWING): RL_SWING,                      # 1
+    int(MARightLeftMode.LEFT): RL_POSITION_LABELS[0],          # 3 -> rl_left
+    int(MARightLeftMode.LEFT_CENTER): RL_POSITION_LABELS[1],   # 4 -> rl_left_center
+    int(MARightLeftMode.CENTER): RL_POSITION_LABELS[2],        # 0 -> rl_center
+    int(MARightLeftMode.RIGHT_CENTER): RL_POSITION_LABELS[3],  # 5 -> rl_right_center
+    int(MARightLeftMode.RIGHT): RL_POSITION_LABELS[4],         # 6 -> rl_right
+}
+HA_TO_MA_RL: dict[str, MARightLeftMode] = {
+    RL_AUTO: MARightLeftMode.AUTO,
+    RL_SWING: MARightLeftMode.SWING,
+    RL_POSITION_LABELS[0]: MARightLeftMode.LEFT,
+    RL_POSITION_LABELS[1]: MARightLeftMode.LEFT_CENTER,
+    RL_POSITION_LABELS[2]: MARightLeftMode.CENTER,
+    RL_POSITION_LABELS[3]: MARightLeftMode.RIGHT_CENTER,
+    RL_POSITION_LABELS[4]: MARightLeftMode.RIGHT,
+}
+
+# --- Running state (unit_state) -> HVACAction ----------------------------------
+# unit_state is the low nibble of the status frame's running-state byte (SDK
+# GeminiMobileData.UnitState), decoded in models.Status. Only the "actively conditioning"
+# states are mapped here; NORMAL(0), WAIT_MULTI(4, outdoor unit busy serving another head)
+# and REQUEST_COMP_OFF(7, setpoint satisfied) are deliberately ABSENT so they fall through
+# to IDLE — the honest action when the compressor isn't serving this head. DRY is handled
+# in climate.hvac_action (a COOL running-state under DRY mode reads as DRYING).
+MA_UNIT_STATE_TO_HVAC_ACTION: dict[int, HVACAction] = {
+    1: HVACAction.PREHEATING,   # STANDBY_HEAT (heat pre-warm)
+    2: HVACAction.DEFROSTING,   # DEFROST
+    5: HVACAction.COOLING,      # COOL
+    6: HVACAction.HEATING,      # HEAT
+}
+
+# Stable snake_case names for the raw unit_state, surfaced as a climate extra-state
+# attribute so the nuance that IDLE collapses (satisfied vs waiting-for-outdoor-unit vs
+# defrost) stays queryable in automations and recorded in history. These strings are
+# historical — keep them stable.
+MA_UNIT_STATE_NAMES: dict[int, str] = {
+    0: "normal",
+    1: "standby_heat",
+    2: "defrost",
+    4: "wait_multi",
+    5: "cool",
+    6: "heat",
+    7: "request_comp_off",
 }
 
 # HOLD is surfaced as a climate preset (only on units whose capability blob advertises
