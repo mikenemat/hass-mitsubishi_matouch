@@ -4,6 +4,95 @@ This is a hardened fork of [cyaneous/hass-mitsubishi_matouch](https://github.com
 focused on running several MA Touch (PAR-CT01MAU) thermostats reliably over ESP32
 Bluetooth proxies, 24/7.
 
+## 0.14.40
+
+- **Surface multi-split mode conflict.** On a multi-split the shared outdoor unit runs
+  one mode at a time, so a head requesting the opposite mode is parked and waits.
+  `hvac_mode` already reflects the unit's reported mode, and a new **`mode_conflict`**
+  climate attribute (`true` when the device reports `WAIT_MULTI`) flags that the requested
+  mode can't run right now — the same signal the MELRemo app shows by flashing the mode
+  icon. Verified live by inducing a heat-vs-cool conflict on a unit.
+
+## 0.14.39
+
+- **`hvac_action` follows the running mode when the unit is on.** On these slim/RAC units
+  the device's running-state field stays `NORMAL` the whole time a unit is actively
+  conditioning (confirmed live via a raw-frame on/off/cooling diff — the `COOL`/`HEAT`
+  states are City-Multi-only), so 0.14.38's "read the running state → IDLE" made the card
+  read *idle* whenever on. The action now derives from the running **mode** when on
+  (cool → cooling, heat → heating, dry → drying, fan → fan), using the running-state field
+  only as an override for the special states it actually reports (defrost, heat pre-warm,
+  wait-for-outdoor-unit). The raw state stays available as a `unit_state` attribute.
+
+## 0.14.38
+
+- **`hvac_action` reads the device's real running state** instead of inferring it from
+  room-vs-setpoint. The **horizontal (left/right) vane** is exposed via Home Assistant's
+  native `swing_horizontal_mode` control (capability-gated). Vane positions get proper
+  capitalized labels and **per-position icons** via entity translations + `icons.json`.
+
+## 0.14.34 – 0.14.37
+
+- **Prefer remote Bluetooth proxies over the host's built-in adapter** — new option,
+  **on by default.** Routes every connection through a remote proxy (ESP32/ESPHome,
+  Shelly, …) whenever one can reach the thermostat, even if the host's own adapter reports
+  a stronger signal; the host radio is used only as a last resort. The host adapter is
+  oversubscribed by persistent connections and prone to Wi-Fi/Bluetooth coexistence, USB-3
+  interference, and driver breakage, so a proxy is the better path in nearly every case.
+  This range also **absorbs the endemic ~43-minute device-side BLE link recycle** (the
+  availability grace + stale-floor are tuned so the card rides through the recycle instead
+  of flickering unavailable ~hourly), reads the host's own adapters via the `habluetooth`
+  manager API, and fixes a doubled MAC in the `active_proxy` sensor.
+
+## 0.14.33
+
+- **Vane back in the climate card as the swing control.** Re-exposes the vertical vane as
+  the climate `swing_mode` control (0.14.27 had moved it to a select entity).
+
+## 0.14.32
+
+- **Send the full 16-bit outbound checksum.** The outbound frame checksum was truncated to
+  8 bits, so any frame whose byte-sum exceeded 255 got a wrong checksum and was **silently
+  dropped by the device** (which looked like an auth/response timeout). Fixed to the full
+  16-bit additive sum, matching the already-correct inbound path; regression-locked in
+  `tests/test_checksum.py`.
+
+## 0.14.31
+
+- **Cut recorder flooding and BLE log-noise.** Reduced per-poll churn into the recorder and
+  downgraded the noisy "unsolicited / late frame" messages (common on weak links) to debug,
+  so 24/7 operation stays quiet.
+
+## 0.14.28 – 0.14.30
+
+- **Device-fault detection.** A unit that connects and authenticates but rejects every
+  operation/settings command with a device error (result `0x09` — e.g. stuck on an `E4`
+  startup screen) now raises a **`device_fault` Repairs** notice and a per-unit **Fault**
+  binary_sensor. Detection is generic (any non-transient device-error result, not just
+  `0x09`/`E4`), fleet-health-scoped so a user briefly in the on-device menus can't trip it,
+  and clears the moment the unit operates normally. Includes a decoder for the device's
+  logged `g0` fault records (check code, source address, timestamp), regression-tested.
+
+## 0.14.23 – 0.14.27
+
+- **Capabilities surfaced and controls wired.** The per-unit capability blob (parsed in
+  0.14.22) now **gates** the exposed HVAC/fan/swing modes and vane positions to what each
+  unit actually supports, is summarized in a single per-unit **Capabilities** diagnostic
+  sensor, and drives the **Hold** and **vane** controls. Vane swing positions carry
+  human-readable labels (horizontal / down N% / fully down). (Hold and vane iterated
+  through preset/select/switch forms across this range before settling.)
+
+## 0.14.17 – 0.14.22
+
+- **Device-info / capability fetch — reverse-engineered and validated live.** Cracked the
+  session-3 `begin → data → end` sequence that reads a unit's capability blob from IDLE
+  with the ordinary user PIN, fixing the session ordering (`begin-0 → end-0 → begin-3`, the
+  credential tier, and the inbound frame-length bound for the ~85-byte blob) and correcting
+  `0x02` to mean **RESTART_JOB**, not a bad PIN. The blob is parsed into structured per-unit
+  capabilities (connect type, supported modes, fan steps, vane / louver / vent / left-right /
+  Move-Eye, temperature unit + step, hold, and the indoor-unit list). Added a
+  `run_idle_sequence` debug harness for cracking session lifecycles safely off the poll path.
+
 ## 0.14.16
 
 - **RE: on-demand device-info / capability fetch (`fetch_device_info` service).** The
