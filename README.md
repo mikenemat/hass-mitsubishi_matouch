@@ -2,6 +2,7 @@
 
 [![hacs][hacs-badge]][hacs]
 [![GitHub Release][release-badge]][releases]
+[![Add repository to HACS][my-hacs-badge]][my-hacs]
 
 A Home Assistant integration for **Mitsubishi MA Touch** wired thermostat
 controllers (**PAR-CT01MAU**) over **Bluetooth LE** — fully local, no Kumo Cloud,
@@ -118,7 +119,9 @@ let the integration load-balance and fail over across them.
 
 > Bluetooth proxies are shared Home Assistant infrastructure, not part of this
 > integration. You set them up once in HA (below); this integration then discovers
-> and uses them automatically — there is nothing proxy-related to configure here.
+> and uses them automatically — no proxy list or per-proxy setup to maintain here.
+> The one routing preference is the **Prefer Bluetooth proxies** option (on by
+> default) — see [Options](#options).
 
 ### How many you need
 
@@ -234,6 +237,7 @@ can grow or shrink the set without redoing everything:
 | Option | Default | Notes |
 |---|---|---|
 | **Polling interval** (s) | `10` | Minimum `5`. Cheap, because the connection is persistent. |
+| **Prefer Bluetooth proxies over the host's built-in adapter** | **on** | Routes every connection through a remote Bluetooth proxy (ESP32/ESPHome, Shelly, …) whenever one can reach the thermostat — **even if the host's built-in/USB adapter reports a stronger signal** — and falls back to the host radio only as a last resort (no proxy in range). On by default because proxies sit near the units and spread the load, sidestepping the host adapter's connection limits, Wi‑Fi/Bluetooth coexistence, USB‑3 interference, and driver flakiness. "Remote" is detected automatically (anything that isn't one of the host's own adapters), so every proxy type qualifies. Applies to each unit on its next reconnect. |
 | **Log every poll to the telemetry file** | off | Verbose; writes each poll to the JSONL log. |
 | **Capture raw status frames** | off | Records the raw status frame (on change) for protocol debugging. Leave off for 24/7 use. |
 
@@ -375,4 +379,6 @@ same MIT license.
 [hacs-badge]: https://img.shields.io/badge/HACS-Custom-41BDF5.svg
 [release-badge]: https://img.shields.io/github/v/release/mikenemat/hass-mitsubishi_matouch
 [releases]: https://github.com/mikenemat/hass-mitsubishi_matouch/releases
+[my-hacs]: https://my.home-assistant.io/redirect/hacs_repository/?owner=mikenemat&repository=hass-mitsubishi_matouch&category=integration
+[my-hacs-badge]: https://my.home-assistant.io/badges/hacs_repository.svg
 [issues]: https://github.com/mikenemat/hass-mitsubishi_matouch/issues
