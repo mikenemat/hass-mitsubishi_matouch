@@ -2,7 +2,6 @@
 
 [![hacs][hacs-badge]][hacs]
 [![GitHub Release][release-badge]][releases]
-[![Add App Repository][my-hacs-badge]][my-hacs]
 
 A Home Assistant integration for **Mitsubishi MA Touch** wired thermostat
 controllers (**PAR-CT01MAU**) over **Bluetooth LE** — fully local, no Kumo Cloud,
@@ -194,6 +193,12 @@ closer to it.
 
 ### HACS (recommended)
 
+One click — opens HACS on your Home Assistant with this repository pre-filled:
+
+[![Add App Repository][my-hacs-badge]][my-hacs]
+
+Or add it manually:
+
 1. HACS → ⋮ → **Custom repositories** → add
    `https://github.com/mikenemat/hass-mitsubishi_matouch`, category **Integration**.
 2. Install **Mitsubishi MA Touch**, then restart Home Assistant. HACS handles
@@ -380,5 +385,5 @@ same MIT license.
 [release-badge]: https://img.shields.io/github/v/release/mikenemat/hass-mitsubishi_matouch
 [releases]: https://github.com/mikenemat/hass-mitsubishi_matouch/releases
 [my-hacs]: https://my.home-assistant.io/redirect/hacs_repository/?owner=mikenemat&repository=hass-mitsubishi_matouch&category=integration
-[my-hacs-badge]: https://img.shields.io/badge/HACS-Add%20App%20Repository-41BDF5.svg
+[my-hacs-badge]: https://my.home-assistant.io/badges/hacs_repository.svg
 [issues]: https://github.com/mikenemat/hass-mitsubishi_matouch/issues
