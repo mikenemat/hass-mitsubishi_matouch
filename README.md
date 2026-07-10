@@ -200,7 +200,7 @@ One click — opens HACS on your Home Assistant with this repository pre-filled:
 Or add it manually:
 
 1. HACS → ⋮ → **Custom repositories** → add
-   `https://github.com/mikenemat/hass-mitsubishi_matouch`, category **Integration**.
+   `https://github.com/cyaneous/hass-mitsubishi_matouch`, category **Integration**.
 2. Install **Mitsubishi MA Touch**, then restart Home Assistant. HACS handles
    updates from there.
 
@@ -382,8 +382,8 @@ same MIT license.
 
 [hacs]: https://github.com/hacs/integration
 [hacs-badge]: https://img.shields.io/badge/HACS-Custom-41BDF5.svg
-[release-badge]: https://img.shields.io/github/v/release/mikenemat/hass-mitsubishi_matouch
-[releases]: https://github.com/mikenemat/hass-mitsubishi_matouch/releases
-[my-hacs]: https://my.home-assistant.io/redirect/hacs_repository/?owner=mikenemat&repository=hass-mitsubishi_matouch&category=integration
+[release-badge]: https://img.shields.io/github/v/release/cyaneous/hass-mitsubishi_matouch
+[releases]: https://github.com/cyaneous/hass-mitsubishi_matouch/releases
+[my-hacs]: https://my.home-assistant.io/redirect/hacs_repository/?owner=cyaneous&repository=hass-mitsubishi_matouch&category=integration
 [my-hacs-badge]: https://my.home-assistant.io/badges/hacs_repository.svg
-[issues]: https://github.com/mikenemat/hass-mitsubishi_matouch/issues
+[issues]: https://github.com/cyaneous/hass-mitsubishi_matouch/issues
