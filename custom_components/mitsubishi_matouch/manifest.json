@@ -5,6 +5,10 @@
     {
       "service_uuid": "0277df18-e796-11e6-bf01-fe55135034f3",
       "connectable": true
+    },
+    {
+      "local_name": "M/R_CT01MA*",
+      "connectable": true
     }
   ],
   "codeowners": ["@cyaneous"],
@@ -15,6 +19,6 @@
   "iot_class": "local_polling",
   "issue_tracker": "https://github.com/cyaneous/hass-mitsubishi_matouch/issues",
   "loggers": ["mitsubishi_matouch"],
-  "requirements": ["bleak-esphome>=2.12.0"],
-  "version": "0.6.0"
+  "requirements": ["construct>=2.10.68", "construct-typing>=0.6.2"],
+  "version": "0.14.40"
 }

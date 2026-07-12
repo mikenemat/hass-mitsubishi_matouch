@@ -1,27 +1,99 @@
 {
   "config": {
-    "abort": {
-      "already_configured": "[%key:common::config_flow::abort::already_configured_device%]"
+    "flow_title": "Mitsubishi MA Touch",
+    "progress": {
+      "searching": "Searching for MA Touch thermostats… This continues automatically and advances as soon as one appears. Make sure your thermostats are powered and within range of a Bluetooth proxy."
     },
-    "flow_title": "Mitsubishi MA Touch {mac}",
     "step": {
-      "user": {
-        "title": "Configure New Thermostat",
+      "pick": {
+        "title": "Add Mitsubishi MA Touch thermostats",
+        "description": "Select the thermostats to add. They are discovered automatically by their CT01MA name via your Bluetooth proxies.",
         "data": {
-          "mac": "MAC address",
-          "pin": "PIN"
+          "address": "Thermostats"
         }
       },
-      "confirm_bluetooth": {
-        "title": "Configure New Thermostat",
+      "retry": {
+        "title": "No thermostats found yet",
+        "description": "No MA Touch thermostats are visible yet. Make sure they are powered and within range of a Bluetooth proxy, then submit to search again."
+      },
+      "device": {
+        "title": "Configure thermostat",
+        "description": "Set a name and the PIN for {device}. Find the PIN on the thermostat under Settings → Bluetooth (enable Bluetooth in the admin settings first; default code 0000).",
         "data": {
+          "name": "Name",
           "pin": "PIN"
         }
       }
     },
+    "abort": {
+      "no_devices_found": "No MA Touch thermostats found nearby. Make sure they are powered and within range of a Bluetooth proxy, then try again.",
+      "already_configured": "Mitsubishi MA Touch is already set up. To add another thermostat, open the existing entry and use the 'Add thermostat' button — you don't need a second entry."
+    },
     "error": {
-      "invalid_mac_address": "Invalid MAC address",
-      "invalid_pin": "Invalid PIN"
+      "invalid_pin": "PIN must be 4 digits"
+    }
+  },
+  "config_subentries": {
+    "thermostat": {
+      "initiate_flow": {
+        "user": "Add thermostat"
+      },
+      "entry_type": "Thermostat",
+      "step": {
+        "user": {
+          "title": "Add thermostat",
+          "description": "Select a thermostat and set its name and PIN. If none are listed yet, submit to search again.",
+          "data": {
+            "address": "Thermostat",
+            "name": "Name",
+            "pin": "PIN"
+          }
+        },
+        "reconfigure": {
+          "title": "Edit thermostat",
+          "data": {
+            "name": "Name",
+            "pin": "PIN"
+          }
+        }
+      },
+      "abort": {
+        "already_configured": "That thermostat is already added."
+      },
+      "error": {
+        "invalid_pin": "PIN must be 4 digits",
+        "no_devices_found": "No new MA Touch thermostats are visible yet. Make sure they are powered and within range of a Bluetooth proxy, then submit to search again."
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Mitsubishi MA Touch options",
+        "data": {
+          "prefer_proxy": "Prefer Bluetooth proxies over the host's built-in adapter",
+          "scan_interval": "Polling interval (seconds)",
+          "log_polls": "Log every poll to the telemetry file (verbose)",
+          "capture_raw_frames": "Capture raw status frames (for debugging)"
+        },
+        "data_description": {
+          "prefer_proxy": "Route connections through any remote Bluetooth proxy (an ESP32/ESPHome proxy, a Shelly, etc. — anything that isn't the host's own adapter) whenever one can reach the thermostat, even if the host's built-in/USB Bluetooth adapter reports a stronger signal. The host radio is used only as a last resort (no proxy in range). Recommended on: proxies distribute connections and sit near the units, avoiding the host adapter's connection limits, Wi-Fi/Bluetooth interference, and driver issues. Applies to each unit on its next reconnect."
+        }
+      }
+    }
+  },
+  "issues": {
+    "invalid_pin": {
+      "title": "{name}: incorrect PIN",
+      "description": "Home Assistant couldn't authenticate to **{name}** — its PIN was rejected, so the thermostat can't be controlled.\n\nTo fix it, open **Settings → Devices & Services → Mitsubishi MA Touch**, find **{name}**, and choose **Reconfigure** to enter the correct PIN. The PIN is on the thermostat under **Settings → Bluetooth** (enable Bluetooth in the admin settings first; default code 0000).\n\nThis alert clears automatically once the correct PIN connects."
+    },
+    "wedged": {
+      "title": "{name}: reachable but won't connect",
+      "description": "Home Assistant can see **{name}** advertising over Bluetooth (a proxy is in range), but every attempt to connect to it has failed for several minutes — so it can't be read or controlled. Your other thermostats are connecting normally.\n\nThis almost always means the thermostat's Bluetooth radio has wedged. **Power-cycle the thermostat** — cut power to it for about 30 seconds (e.g. flip the breaker for that air handler, or disconnect and reseat the controller) — to reset its radio. It should reconnect within a minute.\n\nIf power-cycling doesn't help, make sure a Bluetooth proxy is close enough for a solid signal. This alert clears automatically once the thermostat reconnects."
+    },
+    "device_fault": {
+      "title": "{name}: thermostat reporting a fault",
+      "description": "**{name}** connects over Bluetooth and authenticates, but it's rejecting every operation and settings command with a device error — it appears to be stuck, often on a startup/error screen showing a check code (for example **E4**). It can't be read or controlled until the fault is cleared.\n\n**Look at the thermostat's display** and note the error/check code shown, then **power-cycle the unit** (cut power for about 30 seconds — e.g. the air-handler breaker) and address the underlying fault. A startup fault that halts the unit isn't stored in the readable error log, so the code on the display is the one to go by.\n\nThis alert clears automatically once the thermostat operates normally again."
     }
   },
   "entity": {
@@ -31,6 +103,28 @@
           "fan_mode": {
             "state": {
               "quiet": "Quiet"
+            }
+          },
+          "swing_mode": {
+            "state": {
+              "auto": "Auto",
+              "flat": "Flat",
+              "down_20": "Down 20%",
+              "down_60": "Down 60%",
+              "down_80": "Down 80%",
+              "down_100": "Down 100%",
+              "swing": "Swing"
+            }
+          },
+          "swing_horizontal_mode": {
+            "state": {
+              "rl_auto": "Auto",
+              "rl_left": "Left",
+              "rl_left_center": "Left of center",
+              "rl_center": "Center",
+              "rl_right_center": "Right of center",
+              "rl_right": "Right",
+              "rl_swing": "Swing"
             }
           }
         }

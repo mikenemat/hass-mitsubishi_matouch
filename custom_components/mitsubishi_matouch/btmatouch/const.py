@@ -12,6 +12,9 @@ __all__ = [
     "MAOperationMode",
     "MAFanMode",
     "MAVaneMode",
+    "MAVentMode",
+    "MARightLeftMode",
+    "MAMoveEyeMode",
 ]
 
 
@@ -29,6 +32,9 @@ DEFAULT_COMMAND_TIMEOUT = 5
 
 """The default response wait timeout in seconds."""
 DEFAULT_RESPONSE_TIMEOUT = 5
+
+"""Keepalive read interval in seconds. Must be < the device's ~16s idle-disconnect."""
+DEFAULT_KEEPALIVE_INTERVAL = 10
 
 
 class MAOperationMode(IntEnum):
@@ -66,6 +72,44 @@ class MAVaneMode(EnumBase):
     SWING = 7
 
 
+# --- additional control axes (wire values, from the MELRemo SDK) ---
+# These ride in the two trailing bytes of the control frame (see _MAControlRequest):
+#   louver_vent      byte = (vent << 4) | louver
+#   hold_rl_move_eye byte = (move_eye << 4) | (right_left << 1) | hold
+# with the change-flag in flags_c (louver 0x04, vent 0x08, hold 0x10,
+# right_left 0x20, move_eye 0x40). Support is capability-gated per unit.
+
+
+class MAVentMode(IntEnum):
+    """Ventilation (Lossnay) mode — wire values."""
+
+    OFF = 0
+    LOW = 1
+    HIGH = 2
+
+
+class MARightLeftMode(IntEnum):
+    """Left/right (horizontal) vane position — wire values."""
+
+    CENTER = 0
+    SWING = 1
+    AUTO = 2
+    LEFT = 3
+    LEFT_CENTER = 4
+    RIGHT_CENTER = 5
+    RIGHT = 6
+
+
+class MAMoveEyeMode(IntEnum):
+    """Move-Eye (i-see occupancy airflow) mode — wire values."""
+
+    OFF = 0
+    DIRECT = 1
+    INDIRECT = 2
+    AREA = 3
+    AUTO = 4
+
+
 class _MACharacteristic(StrEnum):
     """Characteristics enumeration."""
     
@@ -86,15 +130,33 @@ class _MAMessageType(EnumBase):
     UNKNOWN_5 = 0x0103 # used during teardown steps, theory: end session?
     STATUS_REQUEST = 0x0205 # request thermostat status
     CONTROL_REQUEST = 0x0105 # control the thermostat
+    # Device-info / capability fetch (RE'd from MELRemo). The capability blob is a
+    # data frame (0x0005 = L2 phase "data" 0x05 + L3 a(0,0)) sent INSIDE a session_type-3
+    # session, so it must be wrapped: begin-session-3 (with PIN) -> 0x0005 -> end-session-3.
+    BEGIN_SESSION_3 = 0x0301 # L2 phase "begin" 0x01 + session_type 3
+    DEVICE_INFO_REQUEST = 0x0005 # L2 phase "data" 0x05 + L3 a(0,0)
+    END_SESSION_3 = 0x0303 # L2 phase "end" 0x03 + session_type 3
 
 
 class _MAResult(EnumBase):
-    """Result enumeration."""
+    """Result enumeration (response/result byte).
+
+    Values confirmed against the decompiled MELRemo SDK response table
+    (controller/i.java). NOTE a historical mislabel that this corrects: 0x02 is
+    NOT a bad PIN — it is the device asking the client to RESTART the job (a
+    transient state / out-of-order-session rejection). The real invalid-password
+    code is 0x0A. The old `BAD_PIN = 0x02` mapping raised false invalid-PIN
+    Repairs notices whenever the device legitimately returned 0x02.
+    """
 
     SUCCESS = 0x00
-    BAD_PIN = 0x02
-    IN_MENUS = 0x09
-    UNKNOWN_3_BAD_PIN = 0x0a
+    # Transient: "restart the job / session" (e.g. a session begun out of order,
+    # or a second session-begin on a link that already holds an open session).
+    # Treat as a retryable link error and reconnect — never as a wrong PIN.
+    RESTART_JOB = 0x02
+    RETRY = 0x08
+    IN_MENUS = 0x09  # observed live on control responses (user is in the device's menus)
+    BAD_PIN = 0x0a   # the real INVALID_PASSWORD (was named UNKNOWN_3_BAD_PIN)
 
 
 class _MAOperationModeFlags(FlagsEnumBase):

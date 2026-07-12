@@ -44,19 +44,28 @@ class _BaseModel[StructType: _MAStruct](ABC):
 class Status(_BaseModel[_MAStatusResponse]):
     """Status model."""
 
-    max_cool_temperature: float
-    min_cool_temperature: float
-    max_heat_temperature: float
-    min_heat_temperature: float
-    max_auto_temperature: float
-    min_auto_temperature: float
-    cool_setpoint: float
-    heat_setpoint: float
-    room_temperature: float
+    # Temperatures may be None: the device sends 0xFFFF ("not set") for setpoints/limits
+    # a given unit or mode doesn't use (see _MATemperature.decode). Consumers must guard.
+    max_cool_temperature: float | None
+    min_cool_temperature: float | None
+    max_heat_temperature: float | None
+    min_heat_temperature: float | None
+    max_auto_temperature: float | None
+    min_auto_temperature: float | None
+    cool_setpoint: float | None
+    heat_setpoint: float | None
+    room_temperature: float | None
     fan_mode: MAFanMode
     vane_mode: MAVaneMode
     hold: bool
     operation_mode: MAOperationMode
+    # Running state + horizontal-vane position, decoded from the status frame's
+    # running-state byte (struct.unknown_8). unit_state is the low nibble (heat/cool/
+    # defrost/standby/etc. — see const.MA_UNIT_STATE_*); right_left is bits 4-6 (the L/R
+    # vane position, MARightLeftMode). Raw ints so an unmapped/reserved wire value never
+    # raises. Defaults keep older construction/replace() call sites working.
+    unit_state: int = 0
+    right_left: int = 0
 
     @classmethod
     def _from_struct(cls, struct: _MAStatusResponse) -> Self:
@@ -73,6 +82,10 @@ class Status(_BaseModel[_MAStatusResponse]):
             fan_mode=struct.fan_mode,
             vane_mode=struct.vane_mode,
             hold=struct.hold,
+            # unit_state = low nibble, right_left = bits 4-6 (first-declared field lands in
+            # the low bits per the SDK bit packer — verified against sdk/a.java).
+            unit_state=struct.unknown_8 & 0x0F,
+            right_left=(struct.unknown_8 >> 4) & 0x07,
             operation_mode=MAOperationMode.AUTO if struct.operation_mode_flags & (_MAOperationModeFlags.FAN|_MAOperationModeFlags.AUTO) == (_MAOperationModeFlags.FAN|_MAOperationModeFlags.AUTO)
             else MAOperationMode.DRY if struct.operation_mode_flags & (_MAOperationModeFlags.FAN|_MAOperationModeFlags.DRY|_MAOperationModeFlags.HEAT) == (_MAOperationModeFlags.FAN|_MAOperationModeFlags.DRY|_MAOperationModeFlags.HEAT)
             else MAOperationMode.HEAT if struct.operation_mode_flags & (_MAOperationModeFlags.FAN|_MAOperationModeFlags.HEAT) == (_MAOperationModeFlags.FAN|_MAOperationModeFlags.HEAT)

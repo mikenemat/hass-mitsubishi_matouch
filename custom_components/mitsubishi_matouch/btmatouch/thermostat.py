@@ -2,6 +2,7 @@
 
 import logging
 import asyncio
+import time
 from types import TracebackType
 from typing import Self
 from construct import StreamError
@@ -24,10 +25,12 @@ from ._structures import (
     _MAControlRequest,
     _MAControlResponse,
 )
+from .capabilities import Capabilities, parse_device_info
 from .const import (
     DEFAULT_MAX_CONNECT_RETRIES,
     DEFAULT_COMMAND_TIMEOUT,
     DEFAULT_RESPONSE_TIMEOUT,
+    DEFAULT_KEEPALIVE_INTERVAL,
     MAOperationMode,
     _MACharacteristic,
     _MAMessageType,
@@ -35,6 +38,9 @@ from .const import (
     _MAOperationModeFlags,
     MAVaneMode,
     MAFanMode,
+    MAVentMode,
+    MARightLeftMode,
+    MAMoveEyeMode,
 )
 from .exceptions import (
     MAAlreadyAwaitingResponseException,
@@ -46,12 +52,33 @@ from .exceptions import (
     MAAuthException,
     MAStateException,
     MATimeoutException,
+    MADeviceErrorException,
 )
 from .models import Status
 
 __all__ = ["Thermostat"]
 
 _LOGGER = logging.getLogger(__name__)
+
+# Sanity bound on an inbound frame's declared length (fail fast on a corrupt length
+# header instead of waiting out the response timeout for bytes that never arrive).
+# Status frames are ~60 bytes, but the device-info / capability blob is ~85 and a
+# legacy fault-history response can concatenate up to 16 records (~180 bytes), so the
+# old 64-byte bound was too tight. 512 covers every known multi-record response while
+# still rejecting a wildly corrupt length.
+_MAX_FRAME_LENGTH = 512
+
+
+class _RawRequest:
+    """Minimal request wrapper for the debug/RE raw-send path: an explicit message_type
+    plus pre-built body bytes (message_type LE + request_flag + payload)."""
+
+    def __init__(self, message_type: int, body: bytes) -> None:
+        self.message_type = message_type
+        self._body = body
+
+    def to_bytes(self) -> bytes:
+        return self._body
 
 
 class Thermostat:
@@ -60,10 +87,12 @@ class Thermostat:
     def __init__(
         self,
         pin: int,
-        ble_device: BLEDevice,
+        address: str,
+        ble_device: BLEDevice | None = None,
         max_connect_retries: int = DEFAULT_MAX_CONNECT_RETRIES,
         command_timeout: int = DEFAULT_COMMAND_TIMEOUT,
         response_timeout: int = DEFAULT_RESPONSE_TIMEOUT,
+        keepalive_interval: int = DEFAULT_KEEPALIVE_INTERVAL,
     ):
         """Initialize the thermostat.
 
@@ -77,12 +106,13 @@ class Thermostat:
             response_timeout (int, optional): The response waiting timeout in seconds. Defaults to DEFAULT_RESPONSE_TIMEOUT.
         """
 
-        self._mac_address = ble_device.address
+        self._mac_address = address
         self._pin = pin
         self._ble_device = ble_device
         self._max_connect_retries = max_connect_retries
         self._command_timeout = command_timeout
         self._response_timeout = response_timeout
+        self._keepalive_interval = keepalive_interval
 
         self._firmware_version: str | None = None
         self._software_version: str | None = None
@@ -95,6 +125,25 @@ class Thermostat:
         self._message_id = 0
         self._receive_length = 0
         self._receive_buffer = bytes(0)
+
+        self._connect_count = 0
+        self._disconnect_count = 0
+        self._connected_at: float | None = None
+        self._last_disconnect_uptime: float | None = None
+        self._last_activity = 0.0
+        self._keepalive_task: asyncio.Task | None = None
+        self._last_status_hex: str | None = None
+        self._expected_response_id: int | None = None
+        # Raw hex of the login / begin-session responses (LOGIN, 0x0003 device-info,
+        # 0x0401 operation-begin), captured to reverse the device-info / capability
+        # layout. These are device->phone responses (no PIN). Empty until a login runs.
+        self._login_responses: dict[str, str] = {}
+        # Raw hex of the device-info / capability response (see async_get_device_info),
+        # captured so the 76-byte capability layout is parsed from real bytes.
+        self._last_device_info_hex: str | None = None
+        # Parsed per-unit capabilities (static hardware facts), populated by the most
+        # recent successful async_get_device_info(). None until first fetched.
+        self._capabilities: Capabilities | None = None
 
     @property
     def is_connected(self) -> bool:
@@ -110,6 +159,21 @@ class Thermostat:
         return self._conn.is_connected
 
     @property
+    def connected_source(self) -> str | None:
+        """Source (proxy/adapter MAC) serving the live connection, if known.
+
+        Read from the BLEDevice details, since the advertisement-based scanner
+        lookups don't reflect a connected (silent) device's path.
+        """
+
+        if not self.is_connected or self._ble_device is None:
+            return None
+        details = getattr(self._ble_device, "details", None)
+        if isinstance(details, dict):
+            return details.get("source")
+        return None
+
+    @property
     def firmware_version(self) -> str | None:
         """Get the thermostat firmware version."""
 
@@ -120,6 +184,59 @@ class Thermostat:
         """Get the thermostat software version."""
 
         return self._software_version
+
+    @property
+    def connect_count(self) -> int:
+        """Total successful connects since instantiation."""
+
+        return self._connect_count
+
+    @property
+    def disconnect_count(self) -> int:
+        """Total disconnect events observed since instantiation."""
+
+        return self._disconnect_count
+
+    @property
+    def connection_uptime(self) -> float | None:
+        """Seconds the current connection has been alive, or None if down."""
+
+        if self._connected_at is None or not self.is_connected:
+            return None
+        return time.monotonic() - self._connected_at
+
+    @property
+    def last_disconnect_uptime(self) -> float | None:
+        """Uptime (s) of the connection that most recently dropped, if any."""
+
+        return self._last_disconnect_uptime
+
+    @property
+    def last_status_hex(self) -> str | None:
+        """Raw hex of the most recent STATUS response (full frame for analysis)."""
+
+        return self._last_status_hex
+
+    @property
+    def last_login_responses(self) -> dict[str, str]:
+        """Raw hex of the login / begin-session responses (for protocol RE: the
+        device-info / capability layout). Empty until a login completes."""
+
+        return dict(self._login_responses)
+
+    @property
+    def last_device_info_hex(self) -> str | None:
+        """Raw hex of the device-info / capability response (or an 'error: ...' string).
+        None until the first login. Used to build/validate the capability parser."""
+
+        return self._last_device_info_hex
+
+    @property
+    def capabilities(self) -> Capabilities | None:
+        """Parsed per-unit capabilities from the last device-info fetch (None until
+        async_get_device_info has succeeded once)."""
+
+        return self._capabilities
 
     async def async_connect(self) -> None:
         """Connect to the thermostat.
@@ -136,9 +253,17 @@ class Thermostat:
         if self.is_connected:
             raise MAStateException("Already connected")
 
+        if self._ble_device is None:
+            raise MAConnectionException("No BLE device available yet")
+
         _LOGGER.debug("[%s] Connecting...", self._mac_address)
 
+        # Start each connection with clean protocol state so a mid-frame
+        # disconnect on the previous link can't corrupt reassembly here.
         self._message_id = 0
+        self._receive_length = 0
+        self._receive_buffer = bytes(0)
+        self._response_future = None
 
         try:
             self._conn = await establish_connection(
@@ -151,6 +276,10 @@ class Thermostat:
 
             _LOGGER.debug("[%s] Connected!", self._mac_address)
 
+            self._connect_count += 1
+            self._connected_at = time.monotonic()
+            self._last_activity = time.monotonic()
+
             await self._conn.start_notify(
                 _MACharacteristic.NOTIFY, self._on_message_received
             )
@@ -159,9 +288,17 @@ class Thermostat:
                 self._firmware_version = await self._async_read_char_str(_MACharacteristic.FIRMWARE_VERSION)
                 self._software_version = await self._async_read_char_str(_MACharacteristic.SOFTWARE_VERSION)
                 _LOGGER.debug("[%s] Firmware version: %s, software version: %s", self._mac_address, self._firmware_version, self._software_version)
+
+            # Start keepalive only after the link is fully ready, so a failure
+            # during setup never leaves an orphan task on a half-open client.
+            self._cancel_keepalive()
+            if self._keepalive_interval > 0:
+                self._keepalive_task = asyncio.create_task(self._keepalive_loop())
         except BleakError as ex:
+            self._cancel_keepalive()
             raise MAConnectionException(f"Could not connect to the device: {ex}") from ex
         except TimeoutError as ex:
+            self._cancel_keepalive()
             raise MATimeoutException("Timeout during connection attempt") from ex
 
     async def async_disconnect(self) -> None:
@@ -174,6 +311,8 @@ class Thermostat:
             MAConnectionException: If the disconnection fails.
             MATimeoutException: If the disconnection times out.
         """
+
+        self._cancel_keepalive()
 
         if not self.is_connected:
             _LOGGER.warning("[%s] No need to disconnect - not connected", self._mac_address)
@@ -188,6 +327,57 @@ class Thermostat:
         except TimeoutError as ex:
             raise MATimeoutException("Timeout during disconnection") from ex
 
+    def set_ble_device(self, ble_device: BLEDevice) -> None:
+        """Update the BLEDevice used for (re)connection.
+
+        HA refreshes the BLEDevice as new advertisements arrive (including via
+        ESP32 proxies), so the coordinator hands us the freshest one before each
+        connect to keep reconnection reliable.
+        """
+
+        self._ble_device = ble_device
+        self._mac_address = ble_device.address
+
+    async def async_ensure_connected(self) -> None:
+        """Ensure a live, authenticated connection, reused across polls.
+
+        Keeping one persistent connection per device (instead of reconnecting on
+        every poll) is what lets the integration scale to several thermostats,
+        ideally with the connections distributed across ESP32 Bluetooth proxies.
+        """
+
+        if self.is_connected:
+            return
+
+        async with self._connection_lock:
+            if self.is_connected:
+                return
+            await self.async_connect()
+            await self.async_login(pin=self._pin)
+
+    async def async_close(self) -> None:
+        """Best-effort logout and disconnect; safe when already disconnected.
+
+        Used on unload and to drop a broken link so the next poll reconnects.
+        """
+
+        async with self._connection_lock:
+            self._cancel_keepalive()
+            conn = self._conn
+            if conn is None:
+                return
+            try:
+                if conn.is_connected:
+                    try:
+                        await self.async_logout(pin=self._pin)
+                    except Exception:
+                        pass
+                    await conn.disconnect()
+            except Exception as ex:
+                _LOGGER.debug("[%s] Error during close: %s", self._mac_address, ex)
+            finally:
+                self._conn = None
+
     async def async_login(self, pin: int) -> None:
         """Authentication, etc via unknown messages.
 
@@ -200,15 +390,25 @@ class Thermostat:
         """
 
         request = _MAAuthenticatedRequest(message_type=_MAMessageType.LOGIN_REQUEST, request_flag=0x01, pin=pin)
-        await self._async_write_request(request)
+        self._login_responses["login"] = (await self._async_write_request(request)).hex()
 
-        # not sure what this does yet, but seems to be required
+        # 0x0003 — RE (MELRemo): L2 "begin session / device-info". Capture the response
+        # so we can reverse the device-info / capability layout (it was being discarded).
         request = _MAAuthenticatedRequest(message_type=_MAMessageType.UNKNOWN_1, request_flag=0x01, pin=pin)
-        await self._async_write_request(request)
+        self._login_responses["0x0003"] = (await self._async_write_request(request)).hex()
 
-        # not sure what this does yet, but seems to be required
+        # 0x0401 — RE (MELRemo): L2 "operation session begin".
         request = _MAAuthenticatedRequest(message_type=_MAMessageType.UNKNOWN_2, request_flag=0x01, pin=pin)
-        await self._async_write_request(request)
+        self._login_responses["0x0401"] = (await self._async_write_request(request)).hex()
+
+        # NOTE: device-info fetch (async_get_device_info) intentionally NOT called here.
+        # It must run as its own job from IDLE (begin-0 -> begin-3 -> a(0,0) -> end-3 ->
+        # end-0); a session-3 begin issued after this login (which has opened the session-4
+        # operation session via 0x0401) gets result 0x02 RESTART_JOB, not the caps. It is
+        # driven on-demand for a single unit by the coordinator (close -> fresh connect ->
+        # async_get_device_info -> disconnect). DO NOT re-enable on the login/poll path:
+        # in v0.14.12 an experimental request here desynced the assembler and took ALL
+        # units offline in a reconnect loop. On-demand + single-unit only.
 
     async def async_logout(self, pin: int) -> None:
         """Unknown messages at end of connection.
@@ -251,10 +451,137 @@ class Thermostat:
         response_bytes = await self._async_write_request(request)
         response = _MAStatusResponse.from_bytes(response_bytes)
         status = Status._from_struct(response)
+        self._last_status_hex = response_bytes.hex()
         _LOGGER.debug("[%s] Status payload: %s", self._mac_address, response_bytes.hex())
         _LOGGER.debug("[%s] Status IN: %s", self._mac_address, vars(response))
         #_LOGGER.debug("[%s] Status OUT: %s", self._mac_address, vars(status))
         return status
+
+    async def async_get_device_info(self) -> dict[str, str]:
+        """Fetch the device-info / capability blob and return each frame's raw
+        response hex ({begin0, begin3, data, end3, end0}) for diagnosis/parsing.
+
+        Constraint-verified against the decompiled MELRemo SDK (byte-exact). The
+        capability blob is a DATA frame (0x0005 = L2 data phase 0x05 + L3 a(0,0))
+        that the device only answers while session_type 3 is the ACTIVE session.
+        Two hard facts the SDK settled:
+          * The ordinary USER PIN opens session 3 — ADMIN is NOT required for the
+            capability blob (only for serviceman op-data). So the stored PIN is
+            used throughout, request_flag 0x01 (first-send) on the credential
+            frames, 0x00 on the data frame.
+          * A session-3 begin CANNOT be opened on top of the live operation
+            session (session 4): the device returns result 0x02 (RESTART_JOB,
+            previously mislabeled BAD_PIN). So device-info must run as its own job
+            from IDLE — begin-0 -> begin-3 -> data a(0,0) -> end-3 -> end-0 —
+            mirroring the SDK login job (controller/c0.d), which itself opens
+            session 3 and issues a(0,0) on every login.
+
+        PRECONDITION: a FRESH connection in IDLE (connected, NOT logged in). The
+        coordinator closes the operation link and reconnects without login before
+        calling this; running it on a logged-in link returns 0x02 / a status frame,
+        not the caps. ON-DEMAND ONLY, never on the recurring poll/login path
+        (v0.14.12 outage lesson). All writes use validate=False so the raw
+        responses (incl. result codes) are observable and an unexpected ack can't
+        raise mid-sequence — each frame is also individually guarded so a desync
+        on one frame still records the others.
+        """
+
+        pin = self._pin
+        out: dict[str, str] = {}
+
+        async def _send(label: str, request) -> None:
+            try:
+                out[label] = (await self._async_write_request(request, validate=False)).hex()
+            except Exception as ex:  # noqa: BLE001
+                out[label] = f"error: {ex}"
+
+        # Sequence mirrors the PROVEN login handshake (begin-0 -> end-0 -> begin-N):
+        # sessions do NOT nest, so session-0 must be ENDED before opening session-3 —
+        # otherwise the device returns 0x02 RESTART_JOB (confirmed live 2026-06-30: a
+        # begin-3 issued while session-0 was still open got 0x02). The static SDK trace
+        # suggested a nested begin-0/begin-3, but the live device requires the same
+        # exclusive begin/end discipline the working login uses for session-4.
+        #   begin-0 (0x0001) -> end-0 (0x0003) -> begin-3 (0x0301) -> data a(0,0)
+        #   (0x0005) -> end-3 (0x0303)
+        # begin/end carry the USER PIN (flag 0x01); the data frame is flagless (0x00).
+        await _send("begin0", _MAAuthenticatedRequest(
+            message_type=_MAMessageType.LOGIN_REQUEST, request_flag=0x01, pin=pin))
+        # end session 0 (message_type 0x0003) — free the link so begin-3 is accepted.
+        await _send("end0", _MAAuthenticatedRequest(
+            message_type=_MAMessageType.UNKNOWN_1, request_flag=0x01, pin=pin))
+        # begin session 3 (device-info session, USER). Resp result byte 0 == ok,
+        # 0x02 == RESTART_JOB (session not free), 0x0a == real bad PIN.
+        await _send("begin3", _MAAuthenticatedRequest(
+            message_type=_MAMessageType.BEGIN_SESSION_3, request_flag=0x01, pin=pin))
+        # data a(0,0) — the capability blob (~76-77 bytes). THIS is the payload we want.
+        await _send("data", _MAStatusRequest(
+            message_type=_MAMessageType.DEVICE_INFO_REQUEST, request_flag=0x00))
+        self._last_device_info_hex = out.get("data")
+        # Parse the capability blob into structured per-unit capabilities.
+        data_hex = out.get("data")
+        if data_hex and not data_hex.startswith("error"):
+            try:
+                self._capabilities = parse_device_info(bytes.fromhex(data_hex))
+                out["caps"] = "ok"
+            except Exception as ex:  # noqa: BLE001 - never let a parse error fail the fetch
+                out["caps"] = f"parse error: {ex}"
+                _LOGGER.debug("[%s] capability parse failed: %s", self._mac_address, ex)
+        # end session 3 — clean teardown (then the coordinator disconnects).
+        await _send("end3", _MAAuthenticatedRequest(
+            message_type=_MAMessageType.END_SESSION_3, request_flag=0x01, pin=pin))
+
+        return out
+
+    async def async_run_idle_sequence(self, steps: list[dict]) -> list[dict]:
+        """DEBUG/RE: run an arbitrary ordered frame sequence on the current connection
+        (assumed fresh + IDLE) and return each step's request + raw response hex. This
+        is the multi-frame analogue of async_send_raw_request: it lets a whole session
+        lifecycle (device-info, fault history, energy, ...) be cracked LIVE against one
+        unit without a redeploy per hypothesis.
+
+        Each step = {"message_type": int, "request_flag": int=1, "pin": bool=True,
+        "payload": hex str=""}. Body = message_type(LE) + request_flag, then the stored
+        PIN + 3 zero bytes if pin=True (authenticated begin/end frame), then any extra
+        payload bytes. A data frame (e.g. fault history a(0,0x17) with an L3 index body)
+        is pin=False with the L3 body in `payload`. validate=False so an unexpected/
+        failure ack is captured rather than raised, and the sequence always runs to end.
+
+        PRECONDITION: a fresh IDLE connection (the coordinator closes the operation link
+        and reconnects without login before calling this). ON-DEMAND + single-unit only,
+        off the recurring poll path (v0.14.12 lesson).
+        """
+
+        out: list[dict] = []
+        for i, step in enumerate(steps):
+            mt = int(step["message_type"]) & 0xFFFF
+            flag = int(step.get("request_flag", 0x01)) & 0xFF
+            use_pin = bool(step.get("pin", True))
+            extra_hex = step.get("payload", "") or ""
+            extra = bytes.fromhex(extra_hex) if extra_hex else b""
+            body = mt.to_bytes(2, "little") + bytes([flag])
+            if use_pin:
+                body += (self._pin & 0xFFFF).to_bytes(2, "little") + b"\x00\x00\x00"
+            body += extra
+            entry: dict[str, str] = {
+                "i": str(i), "mt": f"0x{mt:04x}", "flag": str(flag),
+                "pin": str(use_pin), "req": body.hex(),
+            }
+            try:
+                entry["resp"] = (await self._async_write_request(_RawRequest(mt, body), validate=False)).hex()
+            except Exception as ex:  # noqa: BLE001
+                entry["resp"] = f"error: {ex}"
+            out.append(entry)
+        return out
+
+    async def async_send_raw_request(self, message_type: int, request_flag: int = 0x00, payload: bytes = b"") -> bytes:
+        """DEBUG / RE ONLY: send one arbitrary request and return the raw response
+        payload, with NO validation. Off the login/poll path — used to crack new-command
+        framings against a single unit. A malformed request fails THIS call only (at most
+        one reconnect); it cannot loop, because it is never re-issued automatically.
+        """
+
+        body = (message_type & 0xFFFF).to_bytes(2, "little") + bytes([request_flag & 0xFF]) + payload
+        return await self._async_write_request(_RawRequest(message_type, body), validate=False)
 
     async def async_set_cool_setpoint(self, temperature: float) -> None:
         """Set the heating setpoint temperature.
@@ -389,6 +716,31 @@ class Thermostat:
             vane_mode=vane_mode
         )
 
+    async def async_set_hold(self, on: bool) -> None:
+        """Set HOLD (keep the current setpoint / suspend schedule)."""
+
+        await self._async_write_control_request(flags_c=0x10, hold=1 if on else 0)
+
+    async def async_set_louver(self, on: bool) -> None:
+        """Set the louver on/off (capability-gated; not on all units)."""
+
+        await self._async_write_control_request(flags_c=0x04, louver=1 if on else 0)
+
+    async def async_set_vent_mode(self, vent_mode: MAVentMode) -> None:
+        """Set the ventilation (Lossnay) mode (capability-gated)."""
+
+        await self._async_write_control_request(flags_c=0x08, vent=int(vent_mode))
+
+    async def async_set_right_left_mode(self, right_left_mode: MARightLeftMode) -> None:
+        """Set the left/right (horizontal) vane position (capability-gated)."""
+
+        await self._async_write_control_request(flags_c=0x20, right_left=int(right_left_mode))
+
+    async def async_set_move_eye_mode(self, move_eye_mode: MAMoveEyeMode) -> None:
+        """Set the Move-Eye (i-see occupancy airflow) mode (capability-gated)."""
+
+        await self._async_write_control_request(flags_c=0x40, move_eye=int(move_eye_mode))
+
     ### Internal ###
 
     async def __aenter__(self) -> Self:
@@ -468,13 +820,15 @@ class Thermostat:
 
         async with self._gatt_lock:
             try:
-                return await self._conn.read_gatt_char(uuid)
+                value = await self._conn.read_gatt_char(uuid)
+                self._last_activity = time.monotonic()
+                return value
             except BleakError as ex:
                 raise MARequestException("Error during read") from ex
             except TimeoutError as ex:
                 raise MATimeoutException("Timeout during read") from ex
 
-    async def _async_write_request(self, request: _MARequest) -> bytes:
+    async def _async_write_request(self, request: _MARequest, validate: bool = True) -> bytes:
         """Write a request to the thermostat.
 
         Args:
@@ -502,6 +856,7 @@ class Thermostat:
         message += payload
         message += _MAMessageFooter(crc=self._crc_sum(message)).to_bytes()
 
+        self._expected_response_id = self._message_id
         self._message_id = self._message_id + 1 if self._message_id < 0x07 else 0
 
         self._response_future = asyncio.Future()
@@ -512,6 +867,7 @@ class Thermostat:
                     part = message[i:i+20]
                     _LOGGER.debug("[%s] SND: %s", self._mac_address, part.hex())
                     await self._conn.write_gatt_char(_MACharacteristic.WRITE, part, response=False)
+                self._last_activity = time.monotonic()
             except BleakError as ex:
                 self._response_future = None
                 raise MARequestException(f"Error during request write: {ex}") from ex
@@ -521,6 +877,10 @@ class Thermostat:
 
         try:
             response_bytes = await asyncio.wait_for(self._response_future, self._response_timeout)
+            if not validate:
+                # DEBUG/RE path: return the raw assembled response without the
+                # message-type / result checks (so unexpected replies are observable).
+                return response_bytes
             response_header = _MAResponse.from_bytes(response_bytes)
             if response_header.message_type != request.message_type & 0xff:
                 raise MAResponseException(f"Incorrect response message type received: {response_header.message_type}")
@@ -528,13 +888,42 @@ class Thermostat:
                 case _MAResult.SUCCESS:
                     return response_bytes
                 case _MAResult.IN_MENUS:
-                    raise MAResponseException(f"Failure result received: {response_header.result} - thermostat in menus?")
+                    # 0x09 = ERROR_FROM_DEVICE: the device is connected + authenticated
+                    # but rejects this session/data request. Happens transiently while the
+                    # user is in the on-device menus, and persistently when the unit is
+                    # stuck on an error/startup screen (a fault). Surface it distinctly so
+                    # the coordinator can tell "device error" from a link failure and, if it
+                    # persists, raise the thermostat-fault Repairs notice. The trailing byte
+                    # is the device's error detail (e.g. 0x78 for the observed E4 fault).
+                    detail = response_bytes[-1] if len(response_bytes) >= 3 else None
+                    raise MADeviceErrorException(
+                        f"Device error (result 0x09, detail {detail})", result=0x09, detail=detail
+                    )
+                case _MAResult.RETRY:
+                    # 0x08: device busy — a transient "try again" hint, not a fault.
+                    raise MAResponseException("Device busy (result 0x08, retry)")
+                case _MAResult.RESTART_JOB:
+                    # 0x02: the device asked to restart the job (a transient state /
+                    # out-of-order-session rejection) — NOT a wrong PIN. Surface it as a
+                    # retryable link error so the coordinator drops + reconnects, instead
+                    # of misreading it as auth failure and raising a false bad-PIN notice.
+                    raise MAResponseException("Device requested job restart (result 0x02, transient)")
                 case _MAResult.BAD_PIN:
                     raise MAAuthException("Failure result received: Incorrect PIN?")
-                case _MAResult.UNKNOWN_3_BAD_PIN:
-                    raise MAAuthException("Failure result received: Incorrect PIN?")
                 case _:
-                    raise MAResponseException(f"Failure result received: {response_header.result}")
+                    # Any OTHER non-success result code = the device reporting an error it
+                    # can't continue from (a startup or other fault). Treat generically as a
+                    # device error (NOT limited to 0x09/E4), so ANY failed-startup condition
+                    # where we get an error code and can't proceed raises the fault notice
+                    # once it persists. SUCCESS/RETRY/RESTART/BAD_PIN are handled above.
+                    try:
+                        code = int(response_header.result)
+                    except (TypeError, ValueError):
+                        code = -1
+                    detail = response_bytes[-1] if len(response_bytes) >= 3 else None
+                    raise MADeviceErrorException(
+                        f"Device error (result 0x{code:02x}, detail {detail})", result=code, detail=detail
+                    )
         except TimeoutError as ex:
             raise MATimeoutException("Timeout while awaiting response") from ex
         except StreamError as ex:
@@ -551,7 +940,12 @@ class Thermostat:
         cool_setpoint: float = 0,
         heat_setpoint: float = 0,
         fan_mode: MAFanMode = MAFanMode.NONE,
-        vane_mode: MAVaneMode = MAVaneMode.NONE
+        vane_mode: MAVaneMode = MAVaneMode.NONE,
+        louver: int = 0,
+        vent: int = 0,
+        right_left: int = 0,
+        move_eye: int = 0,
+        hold: int = 0,
     ) -> None:
         request = _MAControlRequest(
             message_type=_MAMessageType.CONTROL_REQUEST,
@@ -565,7 +959,9 @@ class Thermostat:
             unknown_setpoint_1=0,
             unknown_setpoint_2=0,
             unknown_setpoint_3=0,
-            vane_fan_mode=(vane_mode.value << 4) + (fan_mode.value >> 4)
+            vane_fan_mode=(vane_mode.value << 4) + (fan_mode.value >> 4),
+            louver_vent=((int(vent) & 0x0F) << 4) | (int(louver) & 0x0F),
+            hold_rl_move_eye=((int(move_eye) & 0x07) << 4) | ((int(right_left) & 0x07) << 1) | (int(hold) & 0x01),
         )
 
         response_bytes = await self._async_write_request(request)
@@ -576,14 +972,72 @@ class Thermostat:
         # TODO: do we need further checks here?
 
     def _crc_sum(self, frame: bytes) -> int:
-        """Calculate frame CRC."""
+        """Frame checksum: the 16-bit little-endian sum of every byte before the
+        2-byte checksum field.
 
-        return sum(frame) & 0xff
+        Must be 16-bit to match what the DEVICE validates — the inbound check in
+        _on_message_received uses `& 0xFFFF` and is verified live on CT01MAU + CT01MA.
+        This was previously truncated to `& 0xff`, which happened to work only because
+        ordinary frames (status, control, USER login) have byte-sums <= 255, so the
+        high byte is 0 either way. Any frame whose byte-sum exceeds 255 shipped a wrong
+        high byte and the device silently DROPPED it with no reply — which looked like an
+        auth/comms timeout. That is exactly what blocked admin/service login: the constant
+        `0x32BC` user marker (0xbc + 0x32 = 238) plus a PIN pushes the sum well over 255.
+        Frames with sum <= 255 are byte-identical to before, so this is backward-compatible.
+        """
 
-    def _on_disconnected(self, _: BleakClient) -> None:
+        return sum(frame) & 0xFFFF
+
+    def _cancel_keepalive(self) -> None:
+        """Stop the keepalive task if running."""
+
+        if self._keepalive_task is not None:
+            self._keepalive_task.cancel()
+            self._keepalive_task = None
+
+    async def _keepalive_loop(self) -> None:
+        """Hold the connection open against the device's ~16s idle-disconnect.
+
+        The MA Touch firmware drops idle BLE links at ~16s. A cheap characteristic
+        read well inside that window keeps the link alive so polls don't each pay a
+        full reconnect+login. Skips when a request is already in flight or there was
+        recent GATT activity.
+        """
+
+        try:
+            while self.is_connected:
+                await asyncio.sleep(self._keepalive_interval)
+                if not self.is_connected:
+                    return
+                if self._response_future is not None:
+                    continue
+                if (time.monotonic() - self._last_activity) < (self._keepalive_interval - 1):
+                    continue
+                try:
+                    await self._async_read_char(_MACharacteristic.SOFTWARE_VERSION)
+                    _LOGGER.debug("[%s] keepalive", self._mac_address)
+                except Exception as ex:  # noqa: BLE001
+                    _LOGGER.debug("[%s] keepalive read failed: %s", self._mac_address, ex)
+                    return
+        except asyncio.CancelledError:
+            raise
+
+    def _on_disconnected(self, client: BleakClient) -> None:
         """Handle disconnection from the thermostat."""
 
+        # bleak can fire this for a previous client after a fast reconnect; ignore
+        # stale callbacks so they don't clobber the live connection's uptime/state.
+        if client is not self._conn:
+            _LOGGER.debug("[%s] Ignoring stale disconnect callback", self._mac_address)
+            return
+
         _LOGGER.debug("[%s] Disconnected.", self._mac_address)
+
+        self._cancel_keepalive()
+        self._disconnect_count += 1
+        if self._connected_at is not None:
+            self._last_disconnect_uptime = time.monotonic() - self._connected_at
+        self._connected_at = None
 
         if self._response_future is not None and not self._response_future.done():
             exception = MAConnectionException("Connection closed while awaiting response")
@@ -594,28 +1048,80 @@ class Thermostat:
 
         _LOGGER.debug("[%s] RCV: %s", self._mac_address, data.hex())
 
-        data_bytes = bytes(data)
+        # This runs inside a bleak notification callback, where raised exceptions
+        # are swallowed and would otherwise hang the waiter for the full
+        # response_timeout. Contain every parse error: reset reassembly state and
+        # fail the pending future fast so the caller retries immediately.
+        try:
+            data_bytes = bytes(data)
 
-        if self._receive_length == 0:
-            header = _MAMessageHeader.from_bytes(data_bytes)
-            if header.length > 64:
-                raise MAInternalException(f"Received message too long: {header.length}")
+            if self._receive_length == 0:
+                if len(data_bytes) < 3:
+                    raise MAResponseException(f"Runt frame ({len(data_bytes)} bytes)")
+                header = _MAMessageHeader.from_bytes(data_bytes)
+                if header.length > _MAX_FRAME_LENGTH:
+                    raise MAResponseException(f"Frame too long: {header.length}")
+                self._receive_length = header.length
+                self._receive_buffer = data_bytes[2:]
+            else:
+                self._receive_buffer += data_bytes
 
-            self._receive_length = header.length
-            self._receive_buffer = data_bytes[2:]
-        else:
-            self._receive_buffer += data_bytes
+            if len(self._receive_buffer) < self._receive_length:
+                return
+            if len(self._receive_buffer) > self._receive_length:
+                raise MAResponseException("Frame overflow")
 
-        if len(self._receive_buffer) != self._receive_length:
-            return
+            frame_len = self._receive_length
+            self._receive_length = 0
+            buffer = self._receive_buffer
+            self._receive_buffer = bytes(0)
 
-        self._receive_length = 0
-        payload = self._receive_buffer[1:-2]
-        crc = self._receive_buffer[:2]
+            # Validate the trailing checksum so a corrupted reply isn't trusted. The
+            # controller sends sum(all bytes before the 2-byte checksum) as a 16-bit
+            # little-endian value (verified live across CT01MAU + CT01MA frames). The
+            # 2 length-header bytes aren't kept in the buffer, so fold them back in
+            # from frame_len. A mismatch = corruption in transit (e.g. a byte landing
+            # on 0x02 that would otherwise be misread as a wrong PIN); treat it as a
+            # retryable comms error rather than acting on bad data.
+            if len(buffer) < 3:
+                raise MAResponseException(f"Runt assembled frame ({len(buffer)} bytes)")
+            crc_received = int.from_bytes(buffer[-2:], "little")
+            crc_calc = (sum(frame_len.to_bytes(2, "little")) + sum(buffer[:-2])) & 0xFFFF
+            if crc_received != crc_calc:
+                raise MAResponseException(f"Bad checksum (got {crc_received}, want {crc_calc})")
 
-        # TODO: check checksum
+            response_id = buffer[0]
+            payload = buffer[1:-2]
 
-        if self._response_future is not None:
-            self._response_future.set_result(payload)
-        else:
-            raise MAInternalException(f"Unsolicited message received, payload: {payload}")
+            # The controller does NOT echo our request id unchanged: it replies with
+            # request_id | 0x08 (it sets bit 3), confirmed across all message types.
+            # So a frame whose id != expected|0x08 is stale/out-of-order. Debug-only:
+            # the single pending-response future below is what resolves the request,
+            # so a mismatch here is informational, not an error (no per-poll spam).
+            if (
+                response_id is not None
+                and self._expected_response_id is not None
+                and response_id != (self._expected_response_id | 0x08)
+            ):
+                _LOGGER.debug(
+                    "[%s] Unexpected response id %s (expected %s)",
+                    self._mac_address, response_id, self._expected_response_id | 0x08,
+                )
+
+            if self._response_future is not None and not self._response_future.done():
+                self._response_future.set_result(payload)
+            else:
+                # Benign: a late/duplicate response arriving after its request already
+                # timed out or the link churned (common on weak links — see the reconnect
+                # storm in the wild). DEBUG, not WARNING: the actionable failure is the
+                # coordinator's "Error fetching … data" (ERROR); this would just flood.
+                _LOGGER.debug("[%s] Unsolicited message received, payload: %s", self._mac_address, payload.hex())
+        except Exception as ex:  # noqa: BLE001 - must never escape the notify callback
+            # Frame-assembly desync (packet loss/reorder on a weak link). Self-recovering:
+            # we reset the buffer and fail any pending request below → the coordinator
+            # logs the poll failure at ERROR. DEBUG here to avoid per-packet WARNING spam.
+            _LOGGER.debug("[%s] Error processing received frame: %s", self._mac_address, ex)
+            self._receive_length = 0
+            self._receive_buffer = bytes(0)
+            if self._response_future is not None and not self._response_future.done():
+                self._response_future.set_exception(MAResponseException(f"Frame processing error: {ex}"))
